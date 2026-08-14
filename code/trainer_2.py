@@ -36,7 +36,7 @@ print(f"[INFO] All random seeds fixed to {SEED} for full determinism.")
 # Debugging helpers
 torch.autograd.set_detect_anomaly(True)   # shows backward-pass NaN source
 
-def _assert_finite(where, *tensors):
+def _assert_finite(where, *tensors):  #actually not called
     for t in tensors:
         if torch.is_tensor(t) and not torch.isfinite(t).all():
             t_ = torch.nan_to_num(t)
