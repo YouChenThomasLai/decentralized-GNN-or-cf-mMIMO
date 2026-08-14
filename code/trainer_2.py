@@ -34,7 +34,7 @@ os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 print(f"[INFO] All random seeds fixed to {SEED} for full determinism.")
 
 # Debugging helpers
-torch.autograd.set_detect_anomaly(True)   # shows backward-pass NaN source
+torch.autograd.set_detect_anomaly(False)   # shows backward-pass NaN source
 
 def _assert_finite(where, *tensors):  #actually not called
     for t in tensors:
