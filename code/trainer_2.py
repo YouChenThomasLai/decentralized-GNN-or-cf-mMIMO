@@ -1,15 +1,15 @@
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from data import *
-from utils_return_indivial_rates import *
-from model_2 import *                                      
-import matplotlib.pyplot as plt
-import time
 import argparse
 import os
+import random
+
+import numpy as np
+import torch
+import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
+
+from data import MyDataLoader
+from model_2 import node_update
+from utils_return_indivial_rates import discrete_mapping
 
 # -------------------------------
 # FULL DETERMINISM SETUP
