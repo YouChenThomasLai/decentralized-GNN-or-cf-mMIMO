@@ -7,7 +7,7 @@ from matplotlib.ticker import AutoMinorLocator
 # Read Excel File
 # =========================
 # excel_file = "results_batch_8_BS-radius_200_RIS-radius_100_vary_Pmax-seed-0/summary_P.xlsx"
-excel_file = "results_batch_8_BS-radius_200_RIS-radius_100_vary_M-seed-0/summary_M.xlsx"
+excel_file = "results_batch_8_BS-radius_200_RIS-radius_100_vary_M/summary_M.xlsx"
 df = pd.read_excel(excel_file, index_col=0)
 
 # Convert column headers to float (x-axis)
