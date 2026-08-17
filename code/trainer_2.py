@@ -127,6 +127,8 @@ class Trainer():
 
         for i in range(self.n_iter):
             loss, sum_rate, rate = self.train_batch()
+            train_losses.append(loss)
+            sum_rates.append(sum_rate)
             train_loss.append(loss)
             train_sum_rate.append(sum_rate)
 
