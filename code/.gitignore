@@ -1,21 +1,14 @@
-results_4/
-results_2_successful_runs/
-results_crashed_old/
-results_9_25/
-results_9_26/
-results/
+# Python bytecode
+__pycache__/
+*.py[cod]
 
-past_results/
-results_debug_decentral_was_higher/    
-# speculation: results_debug_decentral_was_higher/ has the effect of "decentral was higher" in the "final_eval" because "I think" the test set is a bit too small?
-
-results_9_29/
-results_custom_RIS_for_each_AP_v1/
-
-results_single_AP_wth_power_control/
-results_train_full_Pmax_test_AP_power_control/
-results_train_test_AP_power_control/
-
+# Experiment artifacts
 results*/
 past*/
+*.npy
+*.pt
+events.out.tfevents.*
+*.xlsx
+grouped_plot*
+
 instability-checker/
