@@ -55,19 +55,21 @@ def _random_phase_like(theta, num_bits=None):
     return torch.stack((phase.cos(), phase.sin()), dim=-1)
 
 class Trainer():
-    def __init__(self,M,N,L,K,batch_size,at,Pt=40, device="cuda:0"):                         
+    def __init__(self,M,N,L,K,batch_size,at,pmax_dbm=10.0, device="cuda:0"):
         self.M = M                            # num of antennas per AP
         self.N = N                            # num of elements per RIS
         self.K = K                            # num of users
         self.L = L                            # num of RISs                                            (Note: In paper, L refers to num of APs)
-        self.Pmax = 10**((Pt-30)/10)
+        self.pmax_dbm = pmax_dbm
+        self.pmax_w = 10 ** ((pmax_dbm - 30) / 10)
         self.batch_size = batch_size
         self.n_iter = 2000
         self.dataloader = MyDataLoader(M,N,L,batch_size)
         self.dataloader.BS_RIS_association()
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")          
         self.num_of_AP = 5
-        self.model = node_update(M,N,L,6,self.Pmax,2,64,self.num_of_AP, self.device).to(self.device)      
+        self.model = node_update(M,N,L,6,self.pmax_w,2,64,self.num_of_AP, self.device).to(self.device)
+        print(f"[INFO] Per-AP Pmax = {self.pmax_dbm:g} dBm = {self.pmax_w:g} W.")
         self.min_rate = 1
         self.log_interval = 10
         self.log_eval_interval = 500 
@@ -89,7 +91,7 @@ class Trainer():
             
         self.opt.zero_grad()
         W, theta = self.model(user_feature,e,user_index,e_dir,training=True,duplicate=self.dup)
-        loss,sum_rate,rate  = self.dataloader.compute_loss(W,theta,self.Pmax, self.device)
+        loss,sum_rate,rate  = self.dataloader.compute_loss(W,theta,self.pmax_w, self.device)
         loss.backward()
         self.opt.step()
 
@@ -276,22 +278,22 @@ class Trainer():
                 
                 # Centralized (C)
                 W, theta = self.model(user_feature,e,user_index,e_dir,training=True,duplicate=self.dup)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.Pmax, self.device)
+                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.pmax_w, self.device)
                 sum_rate_array_centralized.append(sum_rate.item())
 
                 # Centralized (D)
                 theta_discrete = discrete_mapping(theta,num_bits)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta_discrete,self.Pmax, self.device)
+                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta_discrete,self.pmax_w, self.device)
                 sum_rate_array_centralized_discrete.append(sum_rate.item())
 
                 # Centralized (C, continuous random)  Note: not included in paper
                 theta = _random_phase_like(theta)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.Pmax, self.device)
+                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.pmax_w, self.device)
                 sum_rate_array_centralized_random_phase.append(sum_rate.item())
 
                 # Centralized (D-R)
                 theta_rand_discrete = _random_phase_like(theta, num_bits)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta_rand_discrete,self.Pmax, self.device)
+                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta_rand_discrete,self.pmax_w, self.device)
                 sum_rate_array_centralized_random_phase_discrete.append(sum_rate.item())
 
                 # Decentralized (C)
@@ -310,22 +312,22 @@ class Trainer():
                     e[num_BS] = e[num_BS].to(self.device)
                     e_dir[num_BS] = e_dir[num_BS].to(self.device)
                 W, theta = self.model(user_feature,e,user_index,e_dir,training=False,mean_ue=mean_ue)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.Pmax, self.device)
+                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.pmax_w, self.device)
                 sum_rate_array_decentralized.append(sum_rate.item())
 
                 # Decentralized (D)
                 theta_discrete = discrete_mapping(theta,num_bits)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta_discrete,self.Pmax, self.device)
+                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta_discrete,self.pmax_w, self.device)
                 sum_rate_array_decentralized_discrete.append(sum_rate.item())
 
                 # Decentralized (C, continuous random)  Note: not included in paper
                 theta = _random_phase_like(theta)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.Pmax, self.device)
+                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.pmax_w, self.device)
                 sum_rate_array_decentralized_random_phase.append(sum_rate.item())
 
                 # Decentralized (D-R)
                 theta_rand_discrete = _random_phase_like(theta, num_bits)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta_rand_discrete,self.Pmax, self.device)
+                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta_rand_discrete,self.pmax_w, self.device)
                 sum_rate_array_decentralized_random_phase_discrete.append(sum_rate.item())
 
             return np.mean(sum_rate_array_centralized), np.mean(sum_rate_array_centralized_random_phase),\
@@ -342,7 +344,13 @@ if __name__ == '__main__':
     parser.add_argument("--N", type=int, default=30, help="Number of RIS elements")
     parser.add_argument("--L", type=int, default=4, help="Number of RIS")
     parser.add_argument("--K", type=int, default=8, help="Number of users")
-    parser.add_argument("--Pmax", type=float, default=10.0, help="Power budget")
+    parser.add_argument(
+        "--pmax_dbm", "--Pmax",
+        dest="pmax_dbm",
+        type=float,
+        default=10.0,
+        help="Per-AP maximum transmit power in dBm (converted internally to watts)",
+    )
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--runs", type=int, default=5, help="Number of training runs")
     
@@ -356,7 +364,7 @@ if __name__ == '__main__':
     parser.add_argument("--device", type=str, default="cuda:0", help="Which GPU/CPU to use, e.g., 'cuda:0', 'cuda:1', or 'cpu'")
     args = parser.parse_args()
 
-    exp_name = f"M{args.M}_N{args.N}_L{args.L}_K{args.K}_P{args.Pmax}"
+    exp_name = f"M{args.M}_N{args.N}_L{args.L}_K{args.K}_P{args.pmax_dbm}"
 
     BS = []
     RIS = []
@@ -372,7 +380,7 @@ if __name__ == '__main__':
                           args.K,
                           args.batch_size,
                           i+1, 
-                          args.Pmax, 
+                          args.pmax_dbm,
                           device=args.device)       
         BS.append(trainer.dataloader.BS_Loc_array)
         RIS.append(trainer.dataloader.RIS_Loc_array)
