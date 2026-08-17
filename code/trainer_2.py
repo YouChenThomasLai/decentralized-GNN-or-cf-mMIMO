@@ -4,7 +4,6 @@ import random
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 from data import MyDataLoader
@@ -44,6 +43,16 @@ def _assert_finite(where, *tensors):  #actually not called
                   f"min={t_.min().item():.3e}, max={t_.max().item():.3e}, "
                   f"norm={t_.norm().item():.3e}, shape={tuple(t.shape)}")
             raise RuntimeError(f"Non-finite detected in {where}")
+
+
+def _random_phase_like(theta, num_bits=None):
+    if num_bits is None:
+        phase = 2 * torch.pi * torch.rand_like(theta[..., 0])
+    else:
+        level = 2 ** num_bits
+        phase = torch.randint(level, theta.shape[:-1], device=theta.device)
+        phase = phase.to(theta.dtype) * (2 * torch.pi / level)
+    return torch.stack((phase.cos(), phase.sin()), dim=-1)
 
 class Trainer():
     def __init__(self,M,N,L,K,batch_size,at,Pt=40, device="cuda:0"):                         
@@ -276,14 +285,12 @@ class Trainer():
                 sum_rate_array_centralized_discrete.append(sum_rate.item())
 
                 # Centralized (C, continuous random)  Note: not included in paper
-                theta = torch.rand_like(theta)
-                theta = F.normalize(theta, dim=3)
-                theta = theta.to(self.device)
+                theta = _random_phase_like(theta)
                 loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.Pmax, self.device)
                 sum_rate_array_centralized_random_phase.append(sum_rate.item())
 
                 # Centralized (D-R)
-                theta_rand_discrete = discrete_mapping(theta,num_bits)
+                theta_rand_discrete = _random_phase_like(theta, num_bits)
                 loss,sum_rate,rate = self.dataloader.compute_loss(W,theta_rand_discrete,self.Pmax, self.device)
                 sum_rate_array_centralized_random_phase_discrete.append(sum_rate.item())
 
@@ -312,14 +319,12 @@ class Trainer():
                 sum_rate_array_decentralized_discrete.append(sum_rate.item())
 
                 # Decentralized (C, continuous random)  Note: not included in paper
-                theta = torch.rand_like(theta)
-                theta = F.normalize(theta, dim=3)
-                theta = theta.to(self.device)
+                theta = _random_phase_like(theta)
                 loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.Pmax, self.device)
                 sum_rate_array_decentralized_random_phase.append(sum_rate.item())
 
                 # Decentralized (D-R)
-                theta_rand_discrete = discrete_mapping(theta,num_bits)
+                theta_rand_discrete = _random_phase_like(theta, num_bits)
                 loss,sum_rate,rate = self.dataloader.compute_loss(W,theta_rand_discrete,self.Pmax, self.device)
                 sum_rate_array_decentralized_random_phase_discrete.append(sum_rate.item())
 
