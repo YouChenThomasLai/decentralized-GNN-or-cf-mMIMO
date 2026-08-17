@@ -176,21 +176,13 @@ def generate_channel(M,N,L,K,batch_size,LOS_bs_ris,sigma,loc_RIS,loc_BS,loc_user
         return H_imperfect, imperfect_bs_user, H, channel_bs_user
     return H, channel_bs_user, H, channel_bs_user
 
-def discrete_mapping(theta,num_bits):
-    level = 2**num_bits
-    phase_re =  torch.real(torch.exp(1j*torch.arange(level)/level*2*np.pi))
-    phase_im =  torch.imag(torch.exp(1j*torch.arange(level)/level*2*np.pi))
-    phase = torch.cat((phase_re.unsqueeze(1),phase_im.unsqueeze(1)),dim=1).to('cuda')
-    for i in range(theta.shape[0]):
-        for l in range(theta.shape[1]):
-            for k in range(theta.shape[2]):
-                temp_theta = theta[i,l,k,:]
-                temp_theta = temp_theta - phase
-                temp_theta = torch.norm(temp_theta,dim=1)
-                index = torch.argmin(temp_theta)
-                theta[i,l,k,:] = phase[index]
-
-    return theta
+def discrete_mapping(theta, num_bits):
+    level = 2 ** num_bits
+    angles = torch.arange(level, device=theta.device, dtype=theta.dtype)
+    angles = angles * (2 * torch.pi / level)
+    phase = torch.stack((angles.cos(), angles.sin()), dim=-1)
+    distances = torch.linalg.vector_norm(theta.unsqueeze(-2) - phase, dim=-1)
+    return phase[distances.argmin(dim=-1)]
 
 def cal_loss(W, Theta, H, channel_bs_user,Pmax,num_BS, device):             
     batch_size = W.shape[0]
