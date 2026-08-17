@@ -204,8 +204,9 @@ class MyDataLoader(Dataset):
             return user_feature, e, user_index, e_dir, user_index_for_testing
         
 
-    def gen_testing_data(self,K,ratio,testing_ratio,duplicate=False):
-        self.BS_user_association(K,ratio,testing_ratio)
+    def gen_testing_data(self,K,ratio,testing_ratio,duplicate=False,regenerate_channels=True):
+        if regenerate_channels:
+            self.BS_user_association(K,ratio,testing_ratio)
         if duplicate==False:
             user_feature0, e0, user_index0, e_dir0, user_index_for_testing0 = self.load_data(self.BS_array[0])
             user_feature1, e1, user_index1, e_dir1, user_index_for_testing1 = self.load_data(self.BS_array[1])

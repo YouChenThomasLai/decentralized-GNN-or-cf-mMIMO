@@ -288,7 +288,13 @@ class Trainer():
                 sum_rate_array_centralized_random_phase_discrete.append(sum_rate.item())
 
                 # Decentralized (C)
-                user_feature, e, user_index, e_dir = self.dataloader.gen_testing_data(self.K,self.associate_threshold,self.associate_threshold,False)
+                user_feature, e, user_index, e_dir = self.dataloader.gen_testing_data(
+                    self.K,
+                    self.associate_threshold,
+                    self.associate_threshold,
+                    duplicate=False,
+                    regenerate_channels=False,
+                )
                 mean_ue = torch.Tensor(self.sum_UE/((itera+1)*self.batch_size))
                 mean_ue = mean_ue.to(self.device)
 
