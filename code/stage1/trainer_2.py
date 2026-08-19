@@ -52,12 +52,14 @@ class Trainer:
         batch_size,
         n_iter,
         pmax_dbm=10.0,
+        noise_power=NOISE_POWER,
         device="cuda:0",
     ):
         self.M = M
         self.K = K
         self.pmax_dbm = pmax_dbm
         self.pmax_w = 10 ** ((pmax_dbm - 30) / 10)
+        self.noise_power = noise_power
         self.batch_size = batch_size
         self.n_iter = n_iter
         self.num_of_AP = 5
@@ -100,7 +102,9 @@ class Trainer:
             training=True,
             duplicate=self.dup,
         )
-        loss, sum_rate, rate = self.dataloader.compute_loss(W, self.device)
+        loss, sum_rate, rate = self.dataloader.compute_loss(
+            W, self.device, self.noise_power
+        )
         loss.backward()
         self.opt.step()
         return loss.item(), sum_rate.item(), rate.detach().cpu()
@@ -247,7 +251,7 @@ class Trainer:
                     duplicate=False,
                 )
                 _, centralized_rate, _ = self.dataloader.compute_loss(
-                    centralized_w, self.device
+                    centralized_w, self.device, self.noise_power
                 )
                 sum_rates["centralized_gnn"].append(
                     centralized_rate.item()
@@ -272,7 +276,7 @@ class Trainer:
                     duplicate=False,
                 )
                 _, decentralized_rate, _ = self.dataloader.compute_loss(
-                    decentralized_w, self.device
+                    decentralized_w, self.device, self.noise_power
                 )
                 sum_rates["decentralized_gnn"].append(
                     decentralized_rate.item()
@@ -287,7 +291,7 @@ class Trainer:
                     self.device,
                 )
                 _, mrt_rate, _ = self.dataloader.compute_loss(
-                    mrt_w, self.device
+                    mrt_w, self.device, self.noise_power
                 )
                 sum_rates["mrt"].append(mrt_rate.item())
 
@@ -296,9 +300,10 @@ class Trainer:
                     association_mask,
                     self.pmax_w,
                     self.device,
+                    self.noise_power,
                 )
                 _, rzf_rate, _ = self.dataloader.compute_loss(
-                    rzf_w, self.device
+                    rzf_w, self.device, self.noise_power
                 )
                 sum_rates["rzf"].append(rzf_rate.item())
 
@@ -366,6 +371,7 @@ def main():
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--n_iter", type=int, default=2000)
+    parser.add_argument("--noise_power", type=float, default=NOISE_POWER)
     parser.add_argument("--bs_file", type=str, default="BS_{i}.txt")
     parser.add_argument("--out_dir", type=str, default="results_stage1")
     parser.add_argument("--test_sample_val", type=int, default=128)
@@ -377,6 +383,8 @@ def main():
         parser.error("--runs must be positive")
     if args.n_iter <= 0:
         parser.error("--n_iter must be positive")
+    if args.noise_power <= 0:
+        parser.error("--noise_power must be positive")
     try:
         validate_sample_count(
             "--test_sample_val", args.test_sample_val, args.batch_size
@@ -404,6 +412,7 @@ def main():
             args.batch_size,
             args.n_iter,
             args.pmax_dbm,
+            args.noise_power,
             device=args.device,
         )
         array_dir = os.path.join(base_dir, "arrays")
@@ -424,7 +433,7 @@ def main():
             "direct_channel_fading": DIRECT_CHANNEL_FADING,
             "direct_path_loss_exponent": DIRECT_PATH_LOSS_EXPONENT,
             "direct_channel_scale_exponent": DIRECT_CHANNEL_SCALE,
-            "noise_power": NOISE_POWER,
+            "noise_power": args.noise_power,
             "rzf_regularization": "alpha = K_a * noise_power / Pmax",
             "optimizer": "Adam(lr=0.0001, weight_decay=1e-6)",
         }

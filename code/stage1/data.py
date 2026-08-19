@@ -116,10 +116,12 @@ class MyDataLoader(Dataset):
             raise RuntimeError("No stored association mask")
         return self.association_mask
 
-    def compute_loss(self, W, device):
+    def compute_loss(self, W, device, noise_power=None):
+        kwargs = {} if noise_power is None else {"noise_power": noise_power}
         return cal_loss(
             W,
             self.get_stacked_channels(),
             len(self.BS_array),
             device,
+            **kwargs,
         )
