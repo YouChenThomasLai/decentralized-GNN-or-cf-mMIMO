@@ -9,6 +9,7 @@ from data import (
     MyDataLoader,
 )
 from model_2 import node_update
+from trainer_2 import Trainer, seed_everything
 from utils_return_indivial_rates import (
     DIRECT_CHANNEL_FADING,
     DIRECT_CHANNEL_SCALE,
@@ -28,6 +29,20 @@ NUM_USERS = 3
 EPISODE_STEPS = 12
 PMAX = 10 ** ((15 - 30) / 10)
 DEVICE = torch.device("cpu")
+EXPECTED_EVAL_METRICS = {
+    "centralized_gnn": 1.4083862570114434,
+    "centralized_gnn_p05_user_rate": 0.16294777286238968,
+    "centralized_gnn_fixed_association_regret": 0.02097039856016636,
+    "decentralized_gnn": 1.3086296480614692,
+    "decentralized_gnn_p05_user_rate": 0.1321470204042271,
+    "decentralized_gnn_fixed_association_regret": 0.010759696364402771,
+    "mrt": 7.778923451900482,
+    "mrt_p05_user_rate": 1.7550486475229263,
+    "mrt_fixed_association_regret": 0.004689812660217285,
+    "rzf": 7.9349534958601,
+    "rzf_p05_user_rate": 1.7275636032223702,
+    "rzf_fixed_association_regret": 0.007275372743606567,
+}
 
 
 def build_loader(seed, speed_kmh=30, batch_size=BATCH_SIZE, steps=EPISODE_STEPS):
@@ -410,6 +425,33 @@ def assert_hotspot_reproducibility():
     assert not np.array_equal(first.true_channels, different.true_channels)
 
 
+def assert_evaluator_contract():
+    seed_everything(17)
+    trainer = Trainer(
+        M=NUM_ANTENNAS,
+        K=NUM_USERS,
+        batch_size=BATCH_SIZE,
+        n_iter=1,
+        pmax_dbm=15,
+        noise_power=1e-12,
+        speed_kmh=30,
+        episode_steps=4,
+        train_trajectories=2,
+        validation_trajectories=2,
+        test_trajectories=2,
+        eval_frame_batch_size=4,
+        eval_time_stride=1,
+        bootstrap_samples=10,
+        seed=17,
+        device="cpu",
+    )
+    metrics, raw_metrics = trainer.eval(trainer.test_data)
+    assert metrics.keys() == EXPECTED_EVAL_METRICS.keys()
+    for metric, expected in EXPECTED_EVAL_METRICS.items():
+        assert np.isclose(metrics[metric], expected, atol=1e-6, rtol=0)
+    assert np.array_equal(raw_metrics["evaluation_time_indices"], np.arange(4))
+
+
 def main():
     assert_data_contract_and_dynamics()
     assert_reproducibility_and_stationarity()
@@ -418,6 +460,7 @@ def main():
     assert_channel_statistics()
     assert_hotspot_contract_and_dynamics()
     assert_hotspot_reproducibility()
+    assert_evaluator_contract()
     print("Stage 2 mobility checks passed.")
 
 
