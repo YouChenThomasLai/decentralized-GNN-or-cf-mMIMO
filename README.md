@@ -11,7 +11,7 @@ Create the Conda environment from the repository root:
 ```bash
 conda env create -f code/environment.yml
 conda activate decentralized-inference
-cd code
+cd code/stage0
 ```
 
 The environment uses Python 3.11 and installs PyTorch from the CUDA 12.8 wheel
@@ -69,16 +69,26 @@ python excel_helper.py --root results_batch_8_BS-radius_200_RIS-radius_100_vary_
 python excel_helper.py --root results_batch_8_BS-radius_200_RIS-radius_100_vary_Pmax
 ```
 
-Before plotting, set the workbook path, x-axis label, and output filename in
-`plot-v2.py`, then run:
+Plot either summary by passing the workbook, x-axis label, and output path
+without a file extension:
 
 ```bash
-python plot-v2.py
+python ../plot-v2.py \
+  --excel results_batch_8_BS-radius_200_RIS-radius_100_vary_M/summary_M.xlsx \
+  --x-label '$M$' \
+  --output-base stage0_ppt_assets/stage0_vary_M
+
+python ../plot-v2.py \
+  --excel results_batch_8_BS-radius_200_RIS-radius_100_vary_Pmax/summary_P.xlsx \
+  --x-label '$P_{\mathrm{max}}$ (dBm)' \
+  --output-base stage0_ppt_assets/stage0_vary_Pmax
 ```
+
+Each command writes both PDF and PNG versions of the plot.
 
 ## Code guide
 
-### `trainer_2.py`
+### `stage0/trainer_2.py`
 
 The main training and inference module. `Trainer` creates `MyDataLoader`,
 associates every access point (AP) with the RISs, builds the `node_update`
@@ -91,7 +101,7 @@ network, and manages training, evaluation, logging, and saved artifacts.
 - `eval()` compares centralized and decentralized inference using continuous,
   2-bit discrete, random, and random-discrete RIS phases.
 
-### `model_2.py`
+### `stage0/model_2.py`
 
 Defines the GNN and readout networks:
 
@@ -104,7 +114,7 @@ Defines the GNN and readout networks:
 - `node_update` connects the full model. Its `training=True` forward path is
   centralized; `training=False` uses decentralized AP-local inputs.
 
-### `data.py`
+### `stage0/data.py`
 
 Defines the wireless topology and data pipeline. `Base_station` and `RIS` hold
 topology and channel state. `MyDataLoader` generates channels, associates users
@@ -116,7 +126,7 @@ The key methods are `BS_RIS_association()`, `BS_user_association()`,
 `load_data()`, `gen_training_data()`, `gen_testing_data()`, and
 `compute_loss()`.
 
-### `utils_return_indivial_rates.py`
+### `stage0/utils_return_indivial_rates.py`
 
 Contains geometry, channel simulation, RIS quantization, and rate utilities.
 `Channel` generates small- and large-scale fading; `generate_channel()` builds
@@ -124,23 +134,26 @@ the AP-RIS-user and direct AP-user channels; `discrete_mapping()` maps phases to
 a requested bit resolution; and `cal_loss()` computes user rates, sum rate, and
 the negative-sum-rate training loss.
 
-### `excel_helper.py`
+### `stage0/excel_helper.py`
 
 Scans parameter-named experiment directories, detects the swept variable, and
 writes the `run0` final-evaluation metrics to `summary_<variable>.xlsx`.
 
 ### `plot-v2.py`
 
-Reads a summary workbook and produces a publication-style PDF comparing the
-selected centralized and decentralized methods. Its input path, labels, and
-output filename are configured directly in the script.
+Reads a summary workbook and produces publication-style PDF and PNG plots
+comparing the selected centralized and decentralized methods. Pass the input
+workbook, x-axis label, and output path with `--excel`, `--x-label`, and
+`--output-base`.
 
-The parameter sweeps are defined in `run_exp-v2.sh`; research notes and
-reference material are under `doc/`.
+The Stage 0 parameter sweeps are defined in `stage0/run_exp-v2.sh`. Stage 1
+and Stage 2 keep their own source, scripts, and local results under
+`stage1/` and `stage2/`; research notes and reference material are under
+`doc/`.
 
 ## Development checks
 
-From `code/`:
+From `code/stage0/`:
 
 ```bash
 python -m py_compile *.py

@@ -10,5 +10,8 @@ past*/
 events.out.tfevents.*
 *.xlsx
 grouped_plot*
+*_ppt_assets/
+*.log
+*.status
 
 instability-checker/

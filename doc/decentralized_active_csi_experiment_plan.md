@@ -6,8 +6,8 @@
 - Origin Mode: plan
 - Origin Date: 2026-08-18
 - Last Updated: 2026-08-19
-- Verification Status: ANALYZED（Stage 1A antenna/power sweeps 與 Stage 1B 5-seed full run 已完成；Stage 2 尚未執行）
-- Version Label: decentralized_active_csi_plan_v3
+- Verification Status: ANALYZED（Stage 1A antenna/power sweeps 與 Stage 1B 5-seed full run 已完成；Stage 2A source/checks 已存在，frozen-checkpoint mobility evaluation 與 Stage 2B 尚未完成）
+- Version Label: decentralized_active_csi_plan_v4
 - Living Report: `doc/decentralized_active_csi_experiment_report.md`
 
 ## 1. 核心研究問題
@@ -112,17 +112,19 @@
 - GNN 不必優於 MRT/RZF；centralized/decentralized gap 的大小與正負也不是選參條件。
 - 所有方法繼續使用相同 channels、association masks、noise 與 per-AP power constraints。
 
-### Stage 2 — 加入 mobility，但維持固定 association 與 full CSI
+### Stage 2A — Straight-line mobility，維持固定 association 與 full CSI
 
 **做什麼**
 
-- 在獨立的 `code/stage2/` 複製 Stage 1 source-only baseline；不複製 results、checkpoints、logs 或 caches。完整規格見 `doc/stage2_mobility_implementation_plan.md`。
+- 使用獨立的 `code/stage2/` Stage 1 source-only baseline；不混入 results、checkpoints、logs 或 caches。完整規格見 `doc/stage2_mobility_implementation_plan.md`。
 - 主設定採 $\Delta t=1$ ms、$f_c=2.6$ GHz、2000 periods；每個 UE 在一個 episode 內以固定速度、固定方向走 straight-line segment。
 - 主速度固定為 0、3、30 km/h，另以 80 km/h 作 stress test；先測 homogeneous speed，再測 heterogeneous users。
 - Small-scale fading 使用 Deng et al. [E] 的 first-order stationary Gauss–Markov model，$\rho_k=J_0(2\pi f_{D,k}\Delta t)$；large-scale amplitude 只依 Stage 1 distance/path-loss convention 隨位置更新。
 - Association mask 只在 $t=0$ 依 Stage 1 規則建立一次，整條 trajectory 固定。
 - 同時保存 true CSI 與 AP 端 stored CSI；本階段每期全部 links 更新，因此兩者逐元素相同。
 - 主 gate 不加入新的 log-normal shadowing；通過後才以 Ammar et al. [F], [G] 的 spatially correlated shadowing 作獨立 sensitivity。
+- 開發期先凍結 Stage 1B checkpoints，evaluation-only 於 0/30/80 km/h trajectories；3 km/h 與多 seeds 在方法介面凍結後再補。
+- Mobility-specific matched retraining 不是主 gate；只在需要量化 domain-adaptation gain 時增加。
 
 **為什麼**
 
@@ -132,11 +134,37 @@
 
 **驗收條件**
 
-- Stage 2 的 $t=0$ 與 Stage 1 在相同 positions、initial fading、association、beamformer 下通過 paired rate equivalence；$v=0$ 時單一 episode 的 position/channel 保持不變，跨 trajectories 的 initial distribution 與 Stage 1 相容。
+- Stage 2A 的 $t=0$ 與 Stage 1 在相同 positions、initial fading、association、beamformer 下通過 paired rate equivalence；$v=0$ 時單一 episode 的 position/channel 保持不變，跨 trajectories 的 initial distribution 與 Stage 1 相容。
 - Normalized small-scale channel 的 empirical lag-$\ell$ correlation 符合理論 $\rho_k^\ell$；主參數範圍內隨 lag 與速度上升而下降。
 - 每步位移、distance/path-loss、trajectory boundary、fixed association 與 per-AP power constraint 均通過測試。
 - Stored CSI 與 true CSI 每期完全相同；所有方法共用同一 current channel、mask、noise 與 power constraint。
 - Train/validation/test 按完整 trajectory 切分，禁止把同一 trajectory 的相鄰 frames 分到不同 splits。
+- 凍結 Stage 1B model 能在固定 seed、可重現的 0/30/80 km/h test traces 完成 centralized/decentralized/MRT/RZF evaluation，metrics finite 且 constraints 無違反，即通過 Stage 3 development gate。開發期可每 10 個 periods 評估一次以先看趨勢，但保留完整 traces；這不代表跨 speed traces 已嚴格配對，也不代表已通過多 seed、full-frame 論文 inference gate。
+
+### Stage 2B — Hotspot-aware mobility robustness
+
+**做什麼**
+
+- 不取代 Stage 2A；在相同 channel、power/noise、fixed association、full current CSI 與模型設定下，加入外生 hotspot-aware Markov/semi-Markov mobility。
+- Hotspot state 由預先固定的 transition matrix 產生，另顯式保存 dwell duration；UE 以實體速度連續移動到下一 hotspot，不允許 teleportation。
+- 保留 1 ms small-scale channel block，但把 hotspot transition/dwell 放在較慢的 macro timescale。先生成 long macro trace，再依自然時間占比抽取 2 s dwell/transit clips。
+- 完成 straight/hotspot 的 $2\times2$ train/test matrix，以區分 matched training 與 distribution shift。
+- 開發門檻先用 frozen Stage 1B checkpoint 完成 paired straight/hotspot evaluation；$2\times2$ matched-training matrix 與 10 seeds 延後至 evidence gate。
+- 詳細模型、data contract、statistics 與 gates 見 `doc/stage2_mobility_implementation_plan.md`。
+
+**為什麼**
+
+- Hsu et al. [I] 的 WLAN trace/model 與 González et al. [J] 的大規模手機資料均支持 frequent locations、location preference 與 revisit；Jiang et al. [K] 支持把 dwell 與 destination transition 放在較慢的 temporal model。
+- Stage 2A 的直線軌跡最適合驗證 channel implementation；Stage 2B 則檢查結論是否依賴單一路徑與近乎均質的 occupancy。
+- 本階段沒有 UE action/reward，因此正式名稱是 Markov/semi-Markov mobility，不稱 MDP。MDP/POMDP 留給 Stage 3 association 或後續 joint control。
+
+**驗收條件**
+
+- Transition、dwell、long-run occupancy、speed、boundary 與 position/channel continuity 均通過事前 tolerance。
+- 每個 clip 的 association mask 只在 $t=0$ 建立一次，`stored_channels == true_channels`；不提前加入 stale CSI、dynamic association 或 history observation。
+- Evidence gate 至少 10 個獨立 training seeds；以 seed/trajectory aggregate 作 paired inference，不把 temporally correlated frames 當獨立樣本。此項不阻擋 Stage 3 開發。
+- 主要 estimand 為 $(C-D)_{\mathrm{hotspot}}-(C-D)_{\mathrm{straight}}$；另報告方法排名、5th-percentile UE rate、strongest-AP changes 與 frozen-association regret。
+- 若 interaction 落在事前 practical-equivalence margin 且排名不變，Stage 2A 作主 baseline、Stage 2B 作 robustness；否則 Stage 3–5 必須共同報告兩種 mobility。
 
 ### Stage 3 — 動態 association，但仍提供 full current CSI
 
@@ -171,7 +199,7 @@
 
 **驗收條件**
 
-- Budget 可更新全部 links 時，結果應回到 Stage 2。
+- Budget 可更新全部 links 時，結果應回到對應 mobility model 的 Stage 2A/2B full-CSI baseline。
 - Budget 降低時，平均 CSI age 上升；所有更新 action 均符合 hard budget。
 
 ### Stage 5 — 完整問題：共同控制 CSI updates 與 association
@@ -215,7 +243,7 @@
 
 **測試軸**
 
-- UE speed、feedback budget、switching cost。
+- UE speed、straight/hotspot mobility model、feedback budget、switching cost。
 - AP/UE 數量、AP capacity、channel coherence。
 - 訓練 topology 與未見過的測試 topology。
 
@@ -234,7 +262,7 @@
 
 ## 4. 實驗控制規則
 
-- 每階段固定 train/validation/test trajectories，至少使用 5 個 random seeds。
+- Development gate 可使用 seed-0 paired pilot 驗證 execution、constraints 與趨勢，但不作推論性主張。論文 evidence gate 每階段至少使用 5 個 random seeds；Stage 2B mobility-model comparison 至少使用 10 個 training seeds。
 - 方法比較使用相同 channel realizations 與 mobility traces。
 - 測 CSI scheduling 時先固定 beamformer；測 association 時先固定 CSI availability。
 - 每完成一階段，保存 config、checkpoint、raw logs 與繪圖 script。
@@ -245,9 +273,9 @@
 
 ## 5. 最小可發表路徑
 
-最小主線為：Stage 0 → 1A → 1B → 2 → 4 → 5 → 6 → 7。
+最小主線為：Stage 0 → 1A → 1B → 2A → 2B → 4 → 5 → 6 → 7。
 
-Stage 1A 保留忠實移除 RIS 的失效結果；Stage 1B 才是後續 Stage 2 的 no-RIS snapshot baseline。增加 AP/UE 數量只作 robustness test，不作為修復 noise 或 gradient 尺度的方法。
+Stage 1A 保留忠實移除 RIS 的失效結果；Stage 1B 才是後續 Stage 2A/2B 的 no-RIS snapshot baseline。增加 AP/UE 數量只作 robustness test，不作為修復 noise 或 gradient 尺度的方法。
 
 Stage 3 是重要的診斷實驗：它可顯示在 full CSI 下，history-based association 本身能帶來多少改善，避免把既有的 mobility-aware association 效果誤認為本題的主要創新。
 
@@ -268,3 +296,9 @@ Stage 3 是重要的診斷實驗：它可顯示在 full CSI 下，history-based 
 [G] H. A. Ammar, R. Adve, S. Shahbazpanahi, G. Boudreau, and I. Bahceci, “Handoff Design in User-Centric Cell-Free Massive MIMO Networks Using DRL,” *IEEE Transactions on Communications*, vol. 73, no. 11, pp. 11368–11384, November 2025. [Paper](https://arxiv.org/abs/2507.20966)
 
 [H] 3GPP, “Study on Channel Model for Frequencies from 0.5 to 100 GHz,” TR 38.901, Release 18, v18.1.0, February 2026. [ETSI PDF](https://www.etsi.org/deliver/etsi_tr/138900_138999/138901/18.01.00_60/tr_138901v180100p.pdf)
+
+[I] W.-J. Hsu, T. Spyropoulos, K. Psounis, and A. Helmy, “Modeling Time-Variant User Mobility in Wireless Mobile Networks,” in *Proc. IEEE INFOCOM*, pp. 758–766, May 2007. [DOI](https://doi.org/10.1109/INFCOM.2007.94) · [Author manuscript](https://www.cise.ufl.edu/~helmy/papers/TVC-Infocom-07-published.pdf)
+
+[J] M. C. González, C. A. Hidalgo, and A.-L. Barabási, “Understanding Individual Human Mobility Patterns,” *Nature*, vol. 453, pp. 779–782, June 2008. [DOI](https://doi.org/10.1038/nature06958)
+
+[K] S. Jiang, Y. Yang, S. Gupta, D. Veneziano, S. Athavale, and M. C. González, “The TimeGeo Modeling Framework for Urban Mobility Without Travel Surveys,” *Proceedings of the National Academy of Sciences*, vol. 113, no. 37, pp. E5370–E5378, September 2016. [DOI](https://doi.org/10.1073/pnas.1524261113) · [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC5027456/)

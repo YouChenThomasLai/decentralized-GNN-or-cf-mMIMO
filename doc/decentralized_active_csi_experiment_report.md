@@ -5,9 +5,9 @@
 - Origin Skill: academic-research-suite / experiment-agent
 - Origin Mode: validate（living experiment report）
 - Origin Date: 2026-08-18
-- Last Updated: 2026-08-19
-- Verification Status: ANALYZED（Stage 0、Stage 1A antenna/power sweeps、Stage 1B calibration 與 5-seed full run）；未進行獨立重新訓練，不標為 VERIFIED
-- Version Label: decentralized_active_csi_report_v3
+- Last Updated: 2026-08-20
+- Verification Status: ANALYZED（Stage 0、Stage 1A antenna/power sweeps、Stage 1B calibration 與 5-seed full run；Stage 2A frozen-checkpoint development pilot 與 Stage 2B hotspot environment pilot 已完成分析）；未進行獨立重新訓練，Stage 2 evidence gates 亦未完成，不標為 VERIFIED
+- Version Label: decentralized_active_csi_report_v5
 - Plan: `doc/decentralized_active_csi_experiment_plan.md`
 
 ## 1. 報告範圍
@@ -19,6 +19,8 @@
 - Stage 0：原版有 RIS 的正向控制。
 - Stage 1A：只移除 RIS、其他數值設定不變的忠實 ablation。
 - Stage 1B：三個 noise values 的 seed-0 calibration pilot 與主設定 `1e-12` 的 5-seed full run 均已完成；numerical/learning gate 通過，但 C/D 方向仍不作穩健結論。
+- Stage 2A：frozen Stage 1B checkpoint 的 0/30/80 km/h evaluation-only development pilot 已完成；環境、channel、fixed-association 與 full-current-CSI gates 通過，但只有 seed 0，不作 evidence-level inference。
+- Stage 2B：同一 frozen checkpoint 的 30 km/h hotspot semi-Markov environment pilot 已完成；trace/channel gates 通過，但 straight/hotspot 尚非 evidence-level paired comparison。
 
 ## 2. 原版與目前 GNN 學習內容
 
@@ -42,7 +44,7 @@ Centralized 與 decentralized 使用同一組已訓練參數。差別只在 infe
 
 ## 3. 執行狀態快照
 
-狀態檢查日期：2026-08-19。
+狀態檢查日期：2026-08-20。
 
 | Stage | 狀態 | Seeds | 備註 |
 |---|---|---:|---|
@@ -52,6 +54,9 @@ Centralized 與 decentralized 使用同一組已訓練參數。差別只在 infe
 | Stage 1A power sweep，$P_{\max}=5,\ldots,35$ dBm | 已完成 | 5/設定 | 7 summaries、35 configs/checkpoints/final evaluations/logs 均完整 |
 | Stage 1B calibration pilot | 已完成 | seed 0 | `1e-11`、`1e-12`、`1e-13` 各 200 iterations；三者皆通過 numerical gate |
 | Stage 1B main full run | 已完成，exit code 0 | 5 seeds（0–4） | `noise_power=1e-12`、每 seed 2000 iterations；5 組 artifacts 完整且 finite |
+| Stage 2A speed-0 matched training | run0 artifacts 完成但不納入 adaptation inference；run1 未完成 | seed 0 完成 | 執行期間 source 被更新，實際載入的舊 evaluator 與 config 所記錄的 disk hashes/output contract 不一致；其餘 runs 已停止 |
+| Stage 2A frozen Stage 1B mobility pilot | Development gate 完成 | seed 0 | evaluation-only；0/30/80 km/h，各 10 test trajectories、每 10 periods 評估一次；artifacts 完整且 finite |
+| Stage 2B frozen Stage 1B hotspot pilot | Environment development gate 完成 | seed 0 | 30 km/h hotspot semi-Markov；10 test trajectories、`eval_time_stride=10`；trace/channel diagnostics 通過 |
 
 ## 4. Stage 0：原版正向控制
 
@@ -72,13 +77,25 @@ Stage 0 保留原版 RIS-GNN 的模型架構、channel/loss 計算、訓練目�
 
 | 類別 | Commit | 相對初始版本的修改 | 對 Stage 0 的影響 |
 |---|---|---|---|
-| Evaluation fairness | [`0338e9a`](https://github.com/lieDownMan/decentralized-GNN-or-cf-mMIMO/commit/0338e9a) | Centralized inference 產生 channel 與 association 後，decentralized inference 以 `regenerate_channels=False` 重用同一批 realization，不再重新抽樣。 | 這是 continuous-phase 主結果的實質修正，使 C 與 D 成為 paired comparison；否則差值同時混入不同 test channels 的 sampling variation。 |
+| Evaluation fairness | [`0338e9a`](https://github.com/lieDownMan/decentralized-GNN-or-cf-mMIMO/commit/0338e9a) | 修改前，centralized 與 decentralized inference 各自呼叫 `BS_user_association()`，因此會分別抽樣 UE 座標與 channel realization，再各自計算 association mask。修改後，centralized 先產生一批資料，decentralized 再以 `regenerate_channels=False` 讀取同一批已儲存資料。 | 同一個 evaluation mini-batch 內，兩種 inference mode 共用 UE 位置、direct/cascaded channel tensors 與 association mask，因此是 paired comparison。AP/RIS 座標原本就固定；下一個 mini-batch 仍會重新產生 UE/channel realization。 |
 | Random-phase baseline | [`4a32e8b`](https://github.com/lieDownMan/decentralized-GNN-or-cf-mMIMO/commit/4a32e8b) | Continuous random phase 改為在 $[0,2\pi)$ 均勻取樣；2-bit random phase 直接從四個合法 levels 均勻取樣。原作法將正值 random vectors normalization，僅覆蓋第一象限。 | 修正 random/random-discrete controls；不改變第 4.3–4.4 節所報的 learned continuous-phase C/D 數值。 |
 | Phase quantization | [`96133a2`](https://github.com/lieDownMan/decentralized-GNN-or-cf-mMIMO/commit/96133a2) | `discrete_mapping()` 改為依輸入 tensor 的 device/dtype 建立 phase levels，以 vectorized、non-mutating nearest-level mapping 取代 hard-coded CUDA 與 in-place loops，並加入四相位測試。 | 修正 CPU/非預設 GPU 執行與輸入被覆寫的風險；影響 discrete variants，不改變 continuous-phase 主表。 |
 | Transmit-power interface | [`6766469`](https://github.com/lieDownMan/decentralized-GNN-or-cf-mMIMO/commit/6766469) | CLI 明確改名為 `--pmax_dbm`，在 trainer 中以 $P_{\max}[\mathrm{W}]=10^{(P_{\max}[\mathrm{dBm}]-30)/10}$ 轉換，並保留 `--Pmax` alias；sweep script 同步改名。 | 原始程式已使用同一轉換，因此此修改不意圖改變數值，只消除輸入單位歧義並明確記錄 per-AP power constraint。 |
 | Training artifacts | [`f1c28ef`](https://github.com/lieDownMan/decentralized-GNN-or-cf-mMIMO/commit/f1c28ef), [`3a8bc23`](https://github.com/lieDownMan/decentralized-GNN-or-cf-mMIMO/commit/3a8bc23) | 統一 validation array 檔名的 `_run{run_id}` 格式，並在每次 iteration 寫入 `losses_run*.npy` 與 `sumrates_run*.npy`，避免空 arrays。 | 只修正可追溯性與後處理輸出，不改變 forward、loss 或 optimizer update。 |
 | Runtime and imports | [`b377afe`](https://github.com/lieDownMan/decentralized-GNN-or-cf-mMIMO/commit/b377afe), [`3f5478d`](https://github.com/lieDownMan/decentralized-GNN-or-cf-mMIMO/commit/3f5478d), [`e66a768`](https://github.com/lieDownMan/decentralized-GNN-or-cf-mMIMO/commit/e66a768) | 以 explicit imports 取代 wildcard imports；註明 `_assert_finite()` 未被呼叫；關閉 expensive autograd anomaly detection。 | 屬於依賴與執行效率整理，沒有預期的數值語義變更。 |
 | Plotting and repository hygiene | [`5837b9b`](https://github.com/lieDownMan/decentralized-GNN-or-cf-mMIMO/commit/5837b9b), [`5fd756f`](https://github.com/lieDownMan/decentralized-GNN-or-cf-mMIMO/commit/5fd756f) | 更新 plotting workbook path，並忽略 results、checkpoints、spreadsheets 與 caches。 | 不參與 training/evaluation 計算。 |
+
+其中，evaluation fairness 修正控制的不是一個抽象的 random seed，而是 centralized/decentralized 每一對比較實際接收的 evaluation realization。修改前後的控制範圍如下：
+
+| Evaluation 項目 | 修改前 | 修改後 |
+|---|---|---|
+| AP 與 RIS 座標 | 兩者皆由 `gen_fixed_location()` 產生，centralized/decentralized 本來就使用同一組固定座標。 | 仍使用同一組固定座標；此項未改變。 |
+| UE 座標與幾何關係 | Centralized 與 decentralized 各自呼叫 `gen_location()`，所以 UE–AP 與 UE–RIS 距離通常不同。 | 每個 mini-batch 只在 centralized 路徑抽樣一次 UE 座標，decentralized 路徑重用相同座標與距離。 |
+| Channel state | 兩條路徑各自執行 `generate_channel()`；direct AP–UE 與 cascaded AP–RIS–UE channel 都會重新產生，且 UE 位置不同也會改變 path loss。 | Decentralized 路徑不再重新產生 channel，而是重用 centralized 路徑儲存的 `H` 與 `channel_bs_user`；因此二者在同一對比較中看到完全相同的 channel tensors。 |
+| AP–UE association | Association mask 分別由兩批 direct-channel RSSI 計算，可能連 served-UE set 都不同。 | 重用同一批 RSSI 所得的 `user_index`/testing mask，因此 served-UE set 固定於該對比較內。 |
+| 模型與數值設定 | 共用同一組 trained parameters、noise、power constraint 與 batch size。 | 維持不變；本修正只排除 evaluation input 不一致這個 confounder。 |
+
+「固定」在此是 **within-pair fixed**：同一個 mini-batch 的 centralized 與 decentralized 結果由同一組 UE 拓樸、channel state 與 association 產生；它不表示整次 evaluation 都凍結在單一 channel realization。進入下一個 mini-batch 時，程式仍會抽樣新的 UE 位置與 channel，並再讓兩種 inference mode 成對共用。因此，修正後的 centralized−decentralized 差值主要反映 CSI visibility/inference mode 的差異，而不再同時混入兩批不同 test samples 的 sampling variation。
 
 因此，Stage 0 應解讀為「保留原版研究方法、修正 evaluation protocol 與工程缺陷後的正向控制」，而非原始 repository 的 byte-for-byte reproduction。對本報告 continuous-phase antenna/power tables 而言，主要會改變比較有效性的修正是 C/D 共用 evaluation realizations；random-phase 與 quantization 修正只影響相應的補充 baselines。
 
@@ -338,7 +355,87 @@ Centralized 與 decentralized GNN 對 MRT 的 mean improvement 分別為 4.28% �
 - Fallacy scan coverage：11/11。Simpson、ecological、Berkson 與 collider fallacies 未被這個 paired-seed design 觸發；base-rate neglect、regression to the mean 與 survivorship bias 不適用；所有事前登記 settings/seeds 皆已報告，未發現 look-elsewhere 或 garden-of-forking-paths 的選擇性報告；本報告不作 observational causal 或 reverse-causality 主張。
 - Reproducibility method：本次只讀取遠端 raw artifacts、config、log 與 checkpoint diagnostics，未獨立重新訓練；因此狀態是 `ANALYZED`，獨立 reproducibility verdict 為 `CANNOT_VERIFY`。
 
-## 7. Current Interpretation
+## 7. Stage 2：mobility development pilots
+
+### 7.1 Evaluation-first transition 與固定設定
+
+原始 Stage 2 sweep 為 4 個 speeds × 5 seeds，每個 setting 都重新訓練 2000 iterations。第一個 speed-0 run 在 2026-08-19 啟動後，檢查發現 `train_trajectories=8`、`episode_steps=2000` 在 speed 0 其實只有 8 個不同的 geometry/channel cases；16,000 個可抽的 `(trajectory,time)` indices 只是在時間軸重複相同 snapshots，training diversity 遠低於 Stage 1 每 iteration 重新抽樣的流程。因此 development gate 改為凍結 Stage 1B seed-0 checkpoint，只評估新 mobility environments，不先重新訓練。
+
+完成的 Stage 2A frozen pilot 使用 `M=2`、`K=8`、`Pmax=15 dBm`、`noise_power=1e-12`、`episode_steps=2000`、`test_sample_final=10` 與 `eval_time_stride=10`。每個 speed 保存完整 2000-step environment/channel trace，但只在每條 trajectory 的 200 個等距 frames 計算 beamforming 與 rate。三個 speeds 使用可重現但彼此獨立的 test trajectories；不能把跨 speed 差值當成 paired causal effect。三組 evaluation 共用同一個 frozen checkpoint，SHA-256 為 `01696331c2d2308c7bb0829bfbd5ecae3efcc94174341f1f442aede34f6a1bab`。
+
+Stage 2B 另以相同 checkpoint、power/noise、episode length、trajectory count 與 stride 評估 30 km/h hotspot semi-Markov environment。Hotspot centers 為 `(±35,0)` 與 `(0,±35)` m，半徑 10 m，transition self-probability 0.6，Gamma dwell mean 5 s、shape 2，先生成 300 s parent macro traces，再均勻抽取 2 s clips。Straight 與 hotspot 的 initial occupancy/mobility-specific draws 不相同，因此目前比較仍是 development-level descriptive shift，不是 evidence-level paired estimate。
+
+### 7.2 Frozen-checkpoint performance
+
+下表為每條 trajectory 先沿時間平均、再跨 10 條 trajectories 平均的 sum rate；括號內是先對各 UE 作時間平均、再於每條 trajectory 取 5th percentile、最後跨 trajectories 平均的 tail metric。
+
+| Environment | Centralized GNN | Decentralized GNN | MRT | RZF | C − D |
+|---|---:|---:|---:|---:|---:|
+| Straight 0 km/h | 8.731929（0.146423） | 8.690268（0.140066） | 8.748156（0.424903） | **9.097457（0.541818）** | 0.041662 |
+| Straight 30 km/h | 8.884984（0.332533） | 8.879867（0.329564） | 8.651761（0.506709） | **9.056366（0.611660）** | 0.005117 |
+| Straight 80 km/h | 8.676560（0.335455） | 8.671882（0.333918） | 8.473778（0.474839） | **8.907159（0.559693）** | 0.004678 |
+| Hotspot 30 km/h | 6.973083（0.300263） | 6.967909（0.298225） | 7.170686（0.522625） | **7.449037（0.562430）** | 0.005174 |
+
+RZF 在四個 environments 的 mean sum rate 與 tail metric 都最高。Centralized 與 decentralized GNN 在 straight 30/80 km/h 及 hotspot 的 practical gap 只有 centralized rate 的 0.054–0.074%；speed 0 gap 較大但仍只有 0.477%。方法排名則會隨 environment 改變：straight 30/80 km/h 為 `RZF > centralized GNN > decentralized GNN > MRT`，speed 0 與 hotspot 則為 `RZF > MRT > centralized GNN > decentralized GNN`，所以不可把 environments pooled 後宣稱單一排名。
+
+Hotspot 相對 straight 30 km/h 的 descriptive sum-rate difference 為 centralized `−21.52%`、decentralized `−21.53%`、MRT `−17.12%`、RZF `−17.75%`。C − D gap 的 mobility-model interaction 只有 `0.005174−0.005117=0.000056`；目前看不出 hotspot 明顯改變 centralized/decentralized gap，但因兩組 test trajectories 未作 evidence-level pairing，這不是 robustness 或 equivalence 證明。
+
+### 7.3 Fixed-association diagnostic
+
+`fixed_association_regret` 定義為同一 frame 使用 current-RSSI reassociation 的 sum rate 減去固定 `t=0` association 的 sum rate；它是重新計算各方法 beamformer 後的 realized difference，不保證逐 trajectory 非負。
+
+| Environment | Centralized GNN | Decentralized GNN | MRT | RZF |
+|---|---:|---:|---:|---:|
+| Straight 0 km/h | 0 | 0 | 0 | 0 |
+| Straight 30 km/h | 0.317371 | 0.315622 | 0.293670 | 0.374850 |
+| Straight 80 km/h | 0.357205 | 0.354507 | 0.384395 | 0.456102 |
+| Hotspot 30 km/h | 0.119171 | 0.116034 | 0.156966 | 0.180527 |
+
+Straight-line pilot 中 regret 隨 30→80 km/h 增加，且 mean fixed-serving-set coverage 從 96.05% 降到 92.91%；這支持把 dynamic association 保留為 Stage 3 的獨立變因。Hotspot clips 的 coverage 為 97.21%，regret 也低於 straight 30 km/h，但該差異同時包含不同 spatial occupancy，不能只歸因於 mobility state machine。
+
+### 7.4 Environment、channel 與 artifact gates
+
+| Environment | Correlation max abs. error | Theory in bootstrap 95% CI | Max step-limit violation | Mean fixed-set coverage | Mean strongest-AP changes/UE |
+|---|---:|---:|---:|---:|---:|
+| Straight 0 km/h | 2.22e-16 | 5/5 lags | 0 m | 1.0000 | 0.0 |
+| Straight 30 km/h | 0.000531 | 5/5 lags | 1.64e-14 m | 0.9605 | 287.5 |
+| Straight 80 km/h | 0.001547 | 5/5 lags | 2.25e-14 m | 0.9291 | 620.0 |
+| Hotspot 30 km/h | 0.005876 | 5/5 lags | 1.73e-18 m | 0.9721 | 168.6 |
+
+四組結果均符合 `abs(correlation error) <= 0.02` gate，所有 arrays finite，`true_stored_max_abs_error=0`，path-loss formula 最大誤差為 0，所有位置均位於 100 m UE disk 內。Straight 0/30/80 km/h 的 Jakes lag-1 coefficients 分別為 1、0.949178 與 0.666090；empirical multi-lag curves 均符合 theoretical curves。
+
+Hotspot diagnostics 額外顯示：empirical occupancy 為 `[0.2523,0.2549,0.2382,0.2547]`，距 stationary target `[0.25,0.25,0.25,0.25]` 的最大偏差為 0.0118；2888 個 dwell events 的 mean 為 4.974 s；empirical transition matrix 與 configured matrix 的最大元素差為 0.034。Dwell/transit empirical lag-1 correlation 為 0.999997/0.949236，對應理論值 0.999995/0.949188。這些結果通過 Stage 2B trace、physical continuity 與 time-varying channel gates。
+
+遠端 frozen pilot 共保存 37 個 config/summary/raw/environment/diagnostic artifacts，logs 未發現 traceback、error、NaN、Inf、OOM、killed 或 failed 記錄。目前本地與遠端六個 Stage 2 source files 的 SHA-256 均與 frozen-run configs 完全一致；在遠端以相同 source 執行 `test_stage2.py`，輸出 `Stage 2 mobility checks passed.`。
+
+**Decision：Stage 2A development gate 通過；Stage 2B environment development gate 通過。** 這代表 mobility/channel implementation、fixed association、full current CSI 與 evaluation pipeline 可供 Stage 3 開發使用，不代表 3 km/h、跨 seed 或 full-stride evidence gates 已完成。
+
+### 7.5 Matched speed-0 run 的 provenance anomaly
+
+`results_stage2_speed_0/speed0_M2_K8_P15/run0` 保存了 40 test trajectories 的 final artifacts：centralized/decentralized/MRT/RZF 分別為 7.050616、6.889877、9.486523、10.166286。Training sum rate 的 first-100/last-100 means 為 6.4271/12.5756，但 centralized validation 從 6.9750 降至 6.8244，decentralized validation 從 6.9191 降至 6.6097；單看這個 run 沒有 mobility-specific adaptation 改善的證據。
+
+更重要的是，該 run 的 config 與 raw artifacts 使用舊版 output contract：沒有 `execution_mode`、`fixed_association_regret`、dynamic-rate arrays 或 `evaluation_time_indices`，但 `source_sha256` 卻記錄了具備這些欄位的目前新版 `trainer_2.py`。Run1 也只有 config、BS array 與不完整 TensorBoard event，沒有 checkpoint 或 final evaluation。這組 evidence 顯示長時間執行中的 Python process 載入舊版 in-memory code 後，disk source 曾被更新，導致「實際執行 code」與「結束時/執行中讀取的 disk hashes」不一致。
+
+因此 matched run0 只保留為 legacy diagnostic，不與 frozen pilot 計算 adaptation gain，也不納入 Stage 2 gate。若未來需要 matched-training comparison，必須從乾淨、凍結且獨立 staged 的 source 重跑，並在 process 啟動前保存 source snapshot，而不只在 config 中即時 hash 可變動的工作目錄。
+
+### 7.6 Statistical validation 與 reproducibility boundary
+
+以 trajectory 為統計單位的 exploratory C − D mean 與未校正 t-based 95% CI 如下；每組只有 10 條 trajectories，未檢查小樣本 normality，且不是跨 training seed inference。
+
+| Environment | C − D | Relative to C | Unadjusted 95% CI |
+|---|---:|---:|---:|
+| Straight 0 km/h | 0.041662 | 0.477% | [−0.002685, 0.086008] |
+| Straight 30 km/h | 0.005117 | 0.058% | [−0.001421, 0.011656] |
+| Straight 80 km/h | 0.004678 | 0.054% | [0.002499, 0.006856] |
+| Hotspot 30 km/h | 0.005174 | 0.074% | [−0.000437, 0.010784] |
+
+即使 straight 80 km/h 的 trajectory-level interval 未跨 0，四個 environments、多個 methods/metrics 尚未作 Holm 或其他 multiplicity correction，且論文主要 statistical unit 應是獨立 training/evaluation seed；因此不宣稱 centralized 有統計優勢。每條 trajectory 只有 8 個 UE，報告的 5th percentile 也是少量 UE rates 的線性插值，應視為 tail summary，不是精確 population percentile。
+
+Fallacy scan coverage 為 11/11。未將不同 environments pooled，避免方法排名反轉形成 Simpson-type 誤讀；沒有由 trajectory aggregate 推論單一 UE、filtered sample、collider control、diagnostic base rate、extreme-case pre/post 或 reverse-causality 問題。Matched sweep 若只保留完成的 run0 會形成 survivorship bias，因此已排除；多設定/多指標的 look-elsewhere risk 與未完成 evidence pairing 的 garden-of-forking-paths/causal overclaim risk 則以 `CAUTION` 標記。Mobility traces 為外生生成，rate 不回饋到 transition，因此不作 reverse-causality 主張。
+
+本次驗證重跑了相同 source 的 Stage 2 contract tests，但沒有重新執行完整 GPU frozen evaluations 或獨立 matched training；整體 verification status 維持 `ANALYZED`，numerical reproducibility verdict 為 `CANNOT_VERIFY`。Stage 2A evidence gate 仍需補 3 km/h、至少 5 seeds 與 `eval_time_stride=1`；Stage 2B evidence gate 仍需 paired seeds 與預先登記的 train/test mobility matrix。
+
+## 8. Current Interpretation
 
 1. Stage 0 在 meaningful-rate regime 下可觀察約 2–6% centralized/decentralized gap，因此原版 code 並非全面失效。
 2. Stage 1A 的 antenna/power sweeps 已全部完成且 artifacts finite。它是忠實且有價值的 negative control：移除主導訊號的 RIS path 後仍沿用 `noise_power=4e-4`，會使 direct-only SINR、sum rate 與 task gradient 一起落入 noise floor，optimizer update 再被 weight decay contribution 主導。
@@ -346,14 +443,18 @@ Centralized 與 decentralized GNN 對 MRT 的 mean improvement 分別為 4.28% �
 4. `1e-12` 是事前指定的 literature-grounded 中點，不是根據 centralized/decentralized gap 或 baseline 勝負事後挑選。`1e-11` 與 `1e-13` 只證明結論對相鄰 noise scale 的 numerical sensitivity。
 5. Stage 1B full run 的 C − D 在 4/5 seeds 為正，但 mean gap 僅 0.0100（0.101%）且 exact paired sign-flip $p=0.125$；這不支持穩健優勢，也不支持等效結論。
 6. 2000 iterations 後 centralized/decentralized GNN 的 mean rate 比 MRT 高 4.28%/4.17%，但比 RZF 低 1.82%/1.92%。GNN 是否超越 baselines 不是 Stage 1B gate；增加 AP/UE 數量只能作 robustness test，不能當作修復 noise scale 的方法。
+7. Stage 2A frozen-checkpoint development gate 已通過。0/30/80 km/h 的 environment/channel contracts 均有效，但 full current CSI 下不預期 sum rate 隨速度單調下降；目前跨 speed trajectories 也未配對，不能把 observed means 作 causal speed effect。
+8. Straight-line fixed-association regret 從 30 到 80 km/h 增加，支持 Stage 3 將 dynamic association 作為下一個獨立變因；這項設計決策來自 association mismatch diagnostics，不來自某個方法勝負。
+9. Stage 2B hotspot trace/channel gates 通過。Hotspot 相對 straight 30 km/h 的四方法 rate 都較低，但 C − D interaction 近乎為零，方法排名中的 GNN/MRT 次序則反轉；目前只作 development-level descriptive observation。
+10. 舊 matched speed-0 run 的 actual loaded code 與記錄 source hashes 不一致，且 sweep 只完成 run0；它不能支持 adaptation gain。Matched retraining 只有在乾淨 source snapshot、paired evaluation 與多 seeds 下重跑後才可納入結論。
 
-## 8. Artifact Index
+## 9. Artifact Index
 
 | Artifact | Path / Location |
 |---|---|
 | Stage 0 paper | `doc/Decentralized Graph Neural Network-Based Joint Beamforming in Multi-RIS-Aided Cell-Free Networks.pdf` |
-| Stage 0 antenna results | `code/results_batch_8_BS-radius_200_RIS-radius_100_vary_M/` |
-| Stage 0 power results | `code/results_batch_8_BS-radius_200_RIS-radius_100_vary_Pmax/` |
+| Stage 0 antenna results | `code/stage0/results_batch_8_BS-radius_200_RIS-radius_100_vary_M/` |
+| Stage 0 power results | `code/stage0/results_batch_8_BS-radius_200_RIS-radius_100_vary_Pmax/` |
 | Stage 1 implementation plan | `doc/stage1_no_ris_implementation_plan.md` |
 | Stage 1A remote antenna results | `lab301-5090:~/ThomasLai/code/stage1/results_stage1_vary_M/` |
 | Stage 1A remote power results | `lab301-5090:~/ThomasLai/code/stage1/results_stage1_vary_Pmax/` |
@@ -362,9 +463,13 @@ Centralized 與 decentralized GNN 對 MRT 的 mean improvement 分別為 4.28% �
 | Stage 1B remote staged source | `lab301-5090:~/ThomasLai/code/stage1b_full_source/` |
 | Stage 1B remote completion status | `lab301-5090:~/ThomasLai/code/stage1/stage1b_full_noise_1e-12.status`；completed 2026-08-19 04:54:30 +08:00，exit code 0 |
 | Stage 1B remote log / results | `lab301-5090:~/ThomasLai/code/stage1/stage1b_full_noise_1e-12.log`；`lab301-5090:~/ThomasLai/code/stage1/results_stage1b_full_noise_1e-12/` |
+| Stage 2 implementation plan | `doc/stage2_mobility_implementation_plan.md` |
+| Stage 2A matched speed-0 legacy run | `lab301-5090:~/ThomasLai/code/stage2/results_stage2_speed_0/speed0_M2_K8_P15/`；run0 完成、run1 不完整；因 provenance anomaly 排除於 adaptation inference |
+| Stage 2A frozen pilot log / results | `lab301-5090:~/ThomasLai/code/stage2/stage2a_frozen_stage1_eval.log`；`lab301-5090:~/ThomasLai/code/stage2/results_stage2a_frozen_stage1_seed0_speed_{0,30,80}/` |
+| Stage 2B hotspot pilot log / results | `lab301-5090:~/ThomasLai/code/stage2/stage2b_frozen_stage1_seed0_speed30.log`；`lab301-5090:~/ThomasLai/code/stage2/results_stage2b_frozen_stage1_seed0_speed_30/` |
 | Related-work review | `doc/related_work_decentralized_active_csi.md` |
 
-## 9. Experiment Log
+## 10. Experiment Log
 
 | Date | Stage | Event | Status | Evidence / Decision |
 |---|---|---|---|---|
@@ -379,8 +484,12 @@ Centralized 與 decentralized GNN 對 MRT 的 mean improvement 分別為 4.28% �
 | 2026-08-19 | Stage 1A | Power sweep completion audit | Complete, 5 seeds/設定 | 7/7 summaries、35/35 configs/checkpoints/final evaluations/logs 完整；arrays finite，log 無 anomaly；noise-floor 結論不變 |
 | 2026-08-19 | Stage 1B | Remote 5-seed full run | Complete, exit code 0 | 02:44:51 啟動、04:54:30 完成；5 seeds × 2000 iterations；5/5 artifact sets 完整且 finite |
 | 2026-08-19 | Stage 1B | Full-run validation | Numerical gate pass; C/D inference caution | C − D mean 0.0100（0.101%）；4/5 正；exact paired sign-flip $p=0.125$；GNN 高於 MRT 但低於 RZF |
+| 2026-08-19 | Stage 2A | speed-0 matched-training transition | Run0 completed; run1 incomplete; excluded from inference | Run0 有 final artifacts，但 actual in-memory evaluator 與 config source hashes/output contract 不一致；不計算 adaptation gain |
+| 2026-08-19 | Stage 2A | Frozen Stage 1B evaluation-first pilot | Complete, seed 0 | 0/30/80 km/h、各 10 trajectories、`eval_time_stride=10`；三組 artifacts 完整且 finite |
+| 2026-08-19 | Stage 2B | Frozen Stage 1B hotspot pilot | Complete, seed 0 | 30 km/h hotspot semi-Markov；trace、continuity、channel、fixed-association 與 full-CSI gates 通過 |
+| 2026-08-20 | Stage 2 | Result and provenance audit | Development gates pass; evidence gates pending | 遠端 source hash matching、37 frozen artifacts、logs 與 raw diagnostics 完整檢查；遠端 `test_stage2.py` 通過；無 active Stage 2 process |
 
-## 10. Next Update Checklist
+## 11. Next Update Checklist
 
 - [x] 補上 Stage 1A 所有 Pmax 的 5-seed mean/std 與 artifact completion status。
 - [x] 記錄 Stage 1A 最終狀態：session/process 已結束、artifacts/log 完整、無 anomaly；當時未保存 numerical exit code，不事後推定。
@@ -388,4 +497,10 @@ Centralized 與 decentralized GNN 對 MRT 的 mean improvement 分別為 4.28% �
 - [x] 執行三個 noise values 的 200-iteration seed-0 pilot，補上 initial-gradient、training-curve、checkpoint 與 final-evaluation diagnostics。
 - [x] 依預先登記 gates 判定主設定 `1e-12` 通過 seed-0 numerical calibration。
 - [x] 完成固定 `noise_power=1e-12` 的 5-seed、2000-iteration full run，確認 intermediate validation/artifact completeness，並分析跨 seed mean/std 與 paired C − D。
+- [x] 將 Stage 2A development gate 改為 frozen Stage 1B checkpoint evaluation-only，並實作、測試 `--checkpoint` 流程。
+- [x] 完成 0/30/80 km/h frozen Stage 1B checkpoint pilot，確認 environment/channel/fixed-association/full-CSI gates 與 artifact completeness。
+- [x] 完成 Stage 2B 30 km/h hotspot development pilot，檢查 occupancy、transition、dwell、continuity 與 phase-specific channel diagnostics。
+- [x] 稽核 speed-0 matched run；記錄 run0 provenance anomaly 與 run1 incomplete artifacts，並排除 adaptation inference。
+- [ ] Stage 2A evidence gate：補 3 km/h、至少 5 seeds、paired evaluation 與 `eval_time_stride=1`。
+- [ ] Stage 2B evidence gate：完成 paired seeds 與預先登記的 straight/hotspot train-test matrix。
 - [ ] 若需將 verification status 從 `ANALYZED` 升為 `VERIFIED`，在保存原 artifacts 的前提下進行一次獨立重新訓練與 tolerance comparison。
