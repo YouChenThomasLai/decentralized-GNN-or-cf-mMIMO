@@ -206,6 +206,21 @@ def assert_straight_kinematics_and_reproducibility():
     )
     assert not hasattr(first, "stored_channels")
 
+    try:
+        MobilityEnvironment(
+            1,
+            1,
+            episode_steps=2,
+            decision_period_s=1,
+            speed_kmh=540,
+        ).generate_trajectories(
+            1, initial_positions=np.zeros((1, 2))
+        )
+    except ValueError as error:
+        assert "initial position" in str(error)
+    else:
+        raise AssertionError("An infeasible straight trajectory was accepted")
+
 
 def assert_channel_contract():
     expected = np.asarray((1.0, 0.999485, 0.949178, 0.666090))
@@ -238,10 +253,15 @@ def assert_hotspot_contract():
     ).generate_trajectories(2, 0.1)
     assert loader.hotspot_state.shape == (4, 2000, 2)
     assert loader.mobility_phase.shape == (4, 2000, 2)
+    assert loader.mobility_sample_phase.shape == (4, 2000, 2)
     assert set(np.unique(loader.mobility_phase)) == {
         MOBILITY_PHASE_DWELL,
         MOBILITY_PHASE_TRANSIT,
     }
+    assert np.array_equal(
+        loader.mobility_phase == MOBILITY_PHASE_TRANSIT,
+        loader.instantaneous_speeds_mps > 0,
+    )
     assert loader.hotspot_burn_in_s >= 120
     clip_duration = (loader.episode_steps - 1) * loader.decision_period_s
     assert np.all(loader.clip_start_times_s >= loader.hotspot_burn_in_s)

@@ -180,6 +180,7 @@ Hotspot mobility 是外生 semi-Markov process，不是 MDP：destination 與 dw
 - Self-transition 會在原 hotspot 開始新的 dwell event，不產生 transit，也不重抽 physical target。因此「event dwell mean」為 5 s，但連續 self-events 合併後的同一-hotspot residence mean 為 $5/(1-0.6)=12.5$ s；兩個統計量必須分開報告。
 - 當 $j\ne i$ 時，在 destination hotspot disk 內依面積均勻抽取 physical target，再以指定 transit speed 沿直線連續前往；不得 teleport。
 - Dwell phase **固定為靜止**，不保留「靜止或局部移動」的未定義分支。因此 dwell 時 instantaneous speed $=0$、$\rho=1$，transit 時才使用設定速度。這是對 Hsu et al. pause state [S2-4] 的簡化對應，也意味本模型不含 stationary-UE 時由環境 scatterer 造成的 fading。
+- 輸出中的 `mobility_phase[t]` 對齊 `instantaneous_speeds_mps[t]`：除最後一點外，它描述 $t\rightarrow t+1$ interval 是否發生移動；`mobility_sample_phase[t]` 則保留取樣瞬間的 dwell/transit state，兩者在跨 phase boundary 的 interval 可以不同。
 - 每條 evaluation trajectory 使用獨立 parent macro trace 與 RNG substream。先捨棄 burn-in，長度至少為 `max(120 s, 10 × configured mean dwell-plus-transit cycle)`；之後保留 300 s macro trace，再從保留區間的合法 start times 均勻抽一個 2 s clip。均勻抽 natural time，不是均勻抽 event，才會保留長 dwell/transit 應有的 time occupancy。
 - 每個 2 s clip 在 $t=0$ 建立一次 association，clip 內固定。
 

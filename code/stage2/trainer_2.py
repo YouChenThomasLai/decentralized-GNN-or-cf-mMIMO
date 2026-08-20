@@ -142,6 +142,7 @@ def save_environment(loader, out_dir):
                 "transition_matrix": loader.transition_matrix,
                 "hotspot_state": loader.hotspot_state,
                 "mobility_phase": loader.mobility_phase,
+                "mobility_sample_phase": loader.mobility_sample_phase,
                 "parent_trace_ids": loader.parent_trace_ids,
                 "clip_start_times_s": loader.clip_start_times_s,
                 "hotspot_burn_in_s": np.asarray(loader.hotspot_burn_in_s),
@@ -326,6 +327,7 @@ def run(args, logger, out_dir, provenance):
             seed=args.seed + 200,
             minimum_events=args.diagnostic_events,
             minimum_outgoing_per_state=args.diagnostic_min_outgoing,
+            decision_period_s=args.decision_period_s,
         )
         np.savez(
             out_dir / "hotspot_process_diagnostics.npz",
