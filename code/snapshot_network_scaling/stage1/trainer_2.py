@@ -39,9 +39,14 @@ def source_provenance():
         )
         return result.stdout.strip() if result.returncode == 0 else "unavailable"
 
-    dirty_status = git("status", "--short")
+    source_commit = os.environ.get("SOURCE_COMMIT") or git(
+        "rev-parse", "HEAD"
+    )
+    dirty_status = os.environ.get("SOURCE_DIRTY_STATUS")
+    if dirty_status is None:
+        dirty_status = git("status", "--short")
     return {
-        "source_commit": git("rev-parse", "HEAD"),
+        "source_commit": source_commit,
         "source_dirty": bool(dirty_status),
         "source_dirty_status": dirty_status,
         "source_hash_sha256": digest.hexdigest(),
