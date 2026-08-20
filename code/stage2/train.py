@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from data import MOBILITY_STRAIGHT, MyDataLoader
+from environment import MOBILITY_STRAIGHT, MobilityEnvironment
 from evaluate import SUMMARY_METRICS, TrajectoryEvaluator
 from model_2 import node_update
 
@@ -151,7 +151,7 @@ class Trainer:
             dwell_shape,
             hotspot_trace_duration_s,
         ) = loader_args
-        return MyDataLoader(
+        return MobilityEnvironment(
             M,
             trajectory_count,
             episode_steps,

@@ -2,11 +2,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from data import (
+from data import MyDataLoader
+from environment import (
     MOBILITY_HOTSPOT,
     MOBILITY_PHASE_DWELL,
     MOBILITY_PHASE_TRANSIT,
-    MyDataLoader,
+    MobilityEnvironment,
 )
 from model_2 import node_update
 from trainer_2 import Trainer, seed_everything
@@ -46,7 +47,7 @@ EXPECTED_EVAL_METRICS = {
 
 
 def build_loader(seed, speed_kmh=30, batch_size=BATCH_SIZE, steps=EPISODE_STEPS):
-    return MyDataLoader(
+    return MobilityEnvironment(
         NUM_ANTENNAS,
         batch_size,
         episode_steps=steps,
@@ -58,7 +59,7 @@ def build_loader(seed, speed_kmh=30, batch_size=BATCH_SIZE, steps=EPISODE_STEPS)
 def build_hotspot_loader(seed):
     transition_matrix = np.full((3, 3), 0.25)
     np.fill_diagonal(transition_matrix, 0.5)
-    return MyDataLoader(
+    return MobilityEnvironment(
         NUM_ANTENNAS,
         16,
         episode_steps=200,
@@ -197,7 +198,9 @@ def assert_stage1_t0_compatibility():
     initial_positions = np.array(
         [[10.0, 5.0], [-25.0, 8.0], [3.0, -40.0]]
     )
-    reference = MyDataLoader(NUM_ANTENNAS, BATCH_SIZE, episode_steps=1)
+    reference = MobilityEnvironment(
+        NUM_ANTENNAS, BATCH_SIZE, episode_steps=1
+    )
     stage1_channels = np.stack(
         [
             generate_channel(
@@ -223,7 +226,7 @@ def assert_stage1_t0_compatibility():
     )
     initial_normalized = stage1_channels / path_loss[..., None]
 
-    loader = MyDataLoader(
+    loader = MobilityEnvironment(
         NUM_ANTENNAS,
         BATCH_SIZE,
         episode_steps=EPISODE_STEPS,
@@ -315,7 +318,7 @@ def assert_channel_statistics():
     actual = jakes_correlation(np.array([0, 3, 30, 80]) / 3.6)
     assert np.allclose(actual, expected, atol=1e-6, rtol=0)
 
-    loader = MyDataLoader(
+    loader = MobilityEnvironment(
         1,
         32,
         episode_steps=500,
@@ -453,6 +456,7 @@ def assert_evaluator_contract():
 
 
 def main():
+    assert MyDataLoader is MobilityEnvironment
     assert_data_contract_and_dynamics()
     assert_reproducibility_and_stationarity()
     assert_stage1_t0_compatibility()

@@ -4,7 +4,7 @@ import os
 import numpy as np
 import torch
 
-from data import MOBILITY_HOTSPOT, MOBILITY_PHASE_LABELS
+from environment import MOBILITY_HOTSPOT, MOBILITY_PHASE_LABELS
 from utils_return_indivial_rates import (
     calculate_rates,
     mrt_beamforming,

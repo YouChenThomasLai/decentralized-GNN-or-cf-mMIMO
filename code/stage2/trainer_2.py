@@ -8,7 +8,7 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import numpy as np
 
-from data import (
+from environment import (
     DEFAULT_HOTSPOT_CENTERS,
     MOBILITY_HOTSPOT,
     MOBILITY_STRAIGHT,
@@ -33,6 +33,7 @@ def source_checksums():
     source_dir = Path(__file__).resolve().parent
     filenames = (
         "data.py",
+        "environment.py",
         "evaluate.py",
         "train.py",
         "utils_return_indivial_rates.py",
