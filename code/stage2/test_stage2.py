@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -8,199 +10,86 @@ from environment import (
     MOBILITY_PHASE_DWELL,
     MOBILITY_PHASE_TRANSIT,
     MobilityEnvironment,
+    SnapshotEnvironment,
+    hotspot_process_diagnostics,
+    symmetric_transition_matrix,
 )
+from evaluate import METHODS, TrajectoryEvaluator, load_frozen_model
 from model_2 import node_update
-from trainer_2 import Trainer, seed_everything
+from trainer_2 import seed_everything
 from utils_return_indivial_rates import (
     DIRECT_CHANNEL_FADING,
     DIRECT_CHANNEL_SCALE,
     DIRECT_PATH_LOSS_EXPONENT,
     cal_loss,
     generate_channel,
+    independent_channel_diagnostics,
     jakes_correlation,
     mrt_beamforming,
     rzf_beamforming,
 )
 
 
-BATCH_SIZE = 2
 NUM_AP = 5
 NUM_ANTENNAS = 2
 NUM_USERS = 3
-EPISODE_STEPS = 12
+BATCH_SIZE = 2
 PMAX = 10 ** ((15 - 30) / 10)
 DEVICE = torch.device("cpu")
-EXPECTED_EVAL_METRICS = {
-    "centralized_gnn": 1.4083862570114434,
-    "centralized_gnn_p05_user_rate": 0.16294777286238968,
-    "centralized_gnn_fixed_association_regret": 0.02097039856016636,
-    "decentralized_gnn": 1.3086296480614692,
-    "decentralized_gnn_p05_user_rate": 0.1321470204042271,
-    "decentralized_gnn_fixed_association_regret": 0.010759696364402771,
-    "mrt": 7.778923451900482,
-    "mrt_p05_user_rate": 1.7550486475229263,
-    "mrt_fixed_association_regret": 0.004689812660217285,
-    "rzf": 7.9349534958601,
-    "rzf_p05_user_rate": 1.7275636032223702,
-    "rzf_fixed_association_regret": 0.007275372743606567,
-}
+CHECKPOINT = (
+    Path(__file__).resolve().parents[1]
+    / "stage1/results_stage1b_full_noise_1e-12/"
+    / "M2_K8_P15.0/run0/models/model_final_run0.pt"
+)
 
 
-def build_loader(seed, speed_kmh=30, batch_size=BATCH_SIZE, steps=EPISODE_STEPS):
-    return MobilityEnvironment(
-        NUM_ANTENNAS,
-        batch_size,
-        episode_steps=steps,
-        speed_kmh=speed_kmh,
-        seed=seed,
-    ).generate_trajectories(NUM_USERS, 0.1)
-
-
-def build_hotspot_loader(seed):
-    transition_matrix = np.full((3, 3), 0.25)
-    np.fill_diagonal(transition_matrix, 0.5)
-    return MobilityEnvironment(
-        NUM_ANTENNAS,
-        16,
-        episode_steps=200,
-        speed_kmh=36,
-        decision_period_s=0.001,
-        seed=seed,
-        mobility_model=MOBILITY_HOTSPOT,
-        hotspot_centers=np.asarray(((-5, 0), (5, 0), (0, 5))),
-        hotspot_radius_m=1,
-        transition_matrix=transition_matrix,
-        dwell_mean_s=0.5,
-        dwell_shape=2,
-        hotspot_trace_duration_s=40,
-    ).generate_trajectories(
-        NUM_USERS,
-        0.1,
-        initial_positions=np.zeros((NUM_USERS, 2)),
-    )
-
-
-def assert_mask_and_power(beamformer, association_mask):
-    batch_size = association_mask.shape[0]
+def assert_mask_and_power(weights, association_mask, num_users, pmax=PMAX):
     flat_mask = association_mask.transpose(0, 2, 1).reshape(
-        batch_size, NUM_AP * NUM_USERS
+        len(association_mask), NUM_AP * num_users
     )
-    expanded_mask = torch.from_numpy(flat_mask).unsqueeze(1).expand_as(
-        beamformer
-    )
-    assert torch.count_nonzero(beamformer[~expanded_mask]) == 0
-
+    mask = torch.from_numpy(flat_mask).unsqueeze(1).expand_as(weights)
+    assert torch.count_nonzero(weights[~mask]) == 0
     for ap in range(NUM_AP):
-        start = ap * NUM_USERS
-        stop = (ap + 1) * NUM_USERS
-        power = beamformer[:, :, start:stop].square().sum(dim=(1, 2))
-        assert torch.all(power <= PMAX + 1e-6)
+        start = ap * num_users
+        stop = (ap + 1) * num_users
+        power = weights[:, :, start:stop].square().sum(dim=(1, 2))
+        assert torch.all(power <= pmax + 1e-6)
 
 
-def assert_data_contract_and_dynamics():
-    loader = build_loader(0)
-    assert loader.ue_positions.shape == (
-        BATCH_SIZE,
-        EPISODE_STEPS,
-        NUM_USERS,
-        2,
+def assert_copied_stage1_snapshot_path():
+    seed_everything(0)
+    loader = SnapshotEnvironment(NUM_ANTENNAS, BATCH_SIZE)
+    central, central_mask = loader.gen_training_data(NUM_USERS, 0.1)
+    local, local_masks = loader.gen_testing_data(
+        NUM_USERS, 0.1, regenerate_channels=False
     )
-    assert loader.ue_speeds_mps.shape == (BATCH_SIZE, NUM_USERS)
-    assert loader.ue_directions_rad.shape == (BATCH_SIZE, NUM_USERS)
-    assert loader.true_channels.shape == (
-        BATCH_SIZE,
-        EPISODE_STEPS,
-        NUM_AP,
-        NUM_USERS,
-        NUM_ANTENNAS,
-    )
-    assert loader.association_mask.shape == (BATCH_SIZE, NUM_USERS, NUM_AP)
-    assert loader.association_mask.dtype == np.bool_
-    assert np.array_equal(loader.true_channels, loader.stored_channels)
-    assert np.array_equal(
-        loader.get_association_mask(expand_time=True),
-        np.broadcast_to(
-            loader.association_mask[:, None],
-            (BATCH_SIZE, EPISODE_STEPS, NUM_USERS, NUM_AP),
-        ),
-    )
-
-    steps = np.linalg.norm(np.diff(loader.ue_positions, axis=1), axis=-1)
-    expected_steps = loader.ue_speeds_mps * loader.decision_period_s
-    assert np.max(np.abs(steps - expected_steps[:, None])) < 1e-10
-    assert np.max(np.linalg.norm(loader.ue_positions, axis=-1)) <= 100 + 1e-12
-
-    expected_path_loss = (
-        DIRECT_CHANNEL_FADING
-        * loader.distances ** (-DIRECT_PATH_LOSS_EXPONENT)
-        / 10 ** DIRECT_CHANNEL_SCALE
-    )
-    assert np.allclose(loader.path_loss_factors, expected_path_loss)
-    assert np.allclose(
-        loader.true_channels,
-        loader.normalized_channels * loader.path_loss_factors[..., None],
-    )
-
-    centralized = loader.get_centralized_features()
-    decentralized = loader.get_decentralized_features()
-    assert centralized.shape == (
-        BATCH_SIZE,
-        EPISODE_STEPS,
-        1,
-        NUM_AP * NUM_USERS,
-        2 * NUM_ANTENNAS,
-    )
-    assert len(decentralized) == NUM_AP
-    assert all(
-        feature.shape
-        == (
-            BATCH_SIZE,
-            EPISODE_STEPS,
-            1,
-            NUM_USERS,
-            2 * NUM_ANTENNAS,
+    channels = loader.get_stacked_channels()
+    association_mask = loader.get_association_mask()
+    model = node_update(NUM_ANTENNAS, 6, PMAX, 64, NUM_AP, DEVICE)
+    model.eval()
+    with torch.inference_mode():
+        beamformers = (
+            model(central, central_mask, training=True),
+            model(local, local_masks, training=False),
+            mrt_beamforming(channels, association_mask, PMAX, DEVICE),
+            rzf_beamforming(
+                channels, association_mask, PMAX, DEVICE, noise_power=1e-12
+            ),
         )
-        for feature in decentralized
-    )
-
-
-def assert_reproducibility_and_stationarity():
-    first = build_loader(7)
-    second = build_loader(7)
-    different = build_loader(8)
-    for name in (
-        "ue_positions",
-        "ue_directions_rad",
-        "true_channels",
-        "association_mask",
-    ):
-        assert np.array_equal(getattr(first, name), getattr(second, name))
-    assert not np.array_equal(first.ue_positions, different.ue_positions)
-    assert not np.array_equal(first.true_channels, different.true_channels)
-
-    stationary = build_loader(9, speed_kmh=0)
-    assert np.array_equal(
-        stationary.ue_positions,
-        np.broadcast_to(
-            stationary.ue_positions[:, :1], stationary.ue_positions.shape
-        ),
-    )
-    assert np.array_equal(
-        stationary.true_channels,
-        np.broadcast_to(
-            stationary.true_channels[:, :1], stationary.true_channels.shape
-        ),
-    )
+    for weights in beamformers:
+        assert_mask_and_power(weights, association_mask, NUM_USERS)
+        assert all(
+            torch.isfinite(value).all()
+            for value in loader.compute_loss(weights, DEVICE, 1e-12)
+        )
 
 
 def assert_stage1_t0_compatibility():
     np.random.seed(11)
-    initial_positions = np.array(
-        [[10.0, 5.0], [-25.0, 8.0], [3.0, -40.0]]
+    initial_positions = np.asarray(
+        ((10.0, 5.0), (-25.0, 8.0), (3.0, -40.0))
     )
-    reference = MobilityEnvironment(
-        NUM_ANTENNAS, BATCH_SIZE, episode_steps=1
-    )
+    reference = SnapshotEnvironment(NUM_ANTENNAS, BATCH_SIZE)
     stage1_channels = np.stack(
         [
             generate_channel(
@@ -215,8 +104,8 @@ def assert_stage1_t0_compatibility():
         axis=1,
     )
     distances = np.linalg.norm(
-        reference.BS_Loc_array[None, :, None, :]
-        - initial_positions[None, None, :, :],
+        reference.BS_Loc_array[None, :, None]
+        - initial_positions[None, None],
         axis=-1,
     )
     path_loss = (
@@ -225,11 +114,10 @@ def assert_stage1_t0_compatibility():
         / 10 ** DIRECT_CHANNEL_SCALE
     )
     initial_normalized = stage1_channels / path_loss[..., None]
-
     loader = MobilityEnvironment(
         NUM_ANTENNAS,
         BATCH_SIZE,
-        episode_steps=EPISODE_STEPS,
+        episode_steps=8,
         speed_kmh=0,
         seed=12,
     ).generate_trajectories(
@@ -241,231 +129,233 @@ def assert_stage1_t0_compatibility():
     assert np.allclose(
         loader.true_channels[:, 0], stage1_channels, atol=1e-12, rtol=1e-12
     )
-
+    assert np.array_equal(
+        loader.true_channels,
+        np.broadcast_to(loader.true_channels[:, :1], loader.true_channels.shape),
+    )
     rssi = np.sum(np.abs(stage1_channels) ** 2, axis=-1)
     stage1_mask = (
         rssi >= np.max(rssi, axis=1, keepdims=True) * 0.1
     ).transpose(0, 2, 1)
     assert np.array_equal(loader.association_mask, stage1_mask)
 
-    stage1_ap_features = []
+    ap_features = []
     for ap in range(NUM_AP):
         feature = np.concatenate(
-            (stage1_channels[:, ap].real, stage1_channels[:, ap].imag),
-            axis=-1,
+            (stage1_channels[:, ap].real, stage1_channels[:, ap].imag), axis=-1
         )
         feature = (feature * stage1_mask[:, :, ap, None]).astype(np.float32)
-        stage1_ap_features.append(
+        ap_features.append(
             F.normalize(torch.from_numpy(feature).unsqueeze(1), dim=2)
         )
-    stage1_feature = torch.cat(stage1_ap_features, dim=2)
+    stage1_feature = torch.cat(ap_features, dim=2)
     stage2_feature = loader.get_frames(np.arange(BATCH_SIZE), 0)[0]
     assert torch.allclose(stage1_feature, stage2_feature, atol=1e-6, rtol=1e-6)
 
-    mrt = mrt_beamforming(stage1_channels, stage1_mask, PMAX, DEVICE)
-    stage1_rate = cal_loss(mrt, stage1_channels, NUM_AP, DEVICE)
+    weights = mrt_beamforming(stage1_channels, stage1_mask, PMAX, DEVICE)
+    stage1_rate = cal_loss(weights, stage1_channels, NUM_AP, DEVICE, 1e-12)
     stage2_rate = loader.compute_loss(
-        mrt,
+        weights,
         DEVICE,
-        trajectory_indices=np.arange(BATCH_SIZE),
-        time_indices=np.zeros(BATCH_SIZE, dtype=int),
+        1e-12,
+        np.arange(BATCH_SIZE),
+        np.zeros(BATCH_SIZE, dtype=int),
     )
     for expected, actual in zip(stage1_rate, stage2_rate):
         assert torch.allclose(expected, actual, atol=1e-6, rtol=1e-6)
 
 
-def assert_beamforming_contract():
-    loader = build_loader(13)
-    trajectory_indices = np.arange(BATCH_SIZE)
-    time_indices = np.array([1, 4])
-    central, central_mask, local, local_masks = loader.get_frames(
-        trajectory_indices, time_indices
+def build_straight(seed, speed_kmh=80):
+    return MobilityEnvironment(
+        1,
+        3,
+        episode_steps=80,
+        speed_kmh=speed_kmh,
+        seed=seed,
+    ).generate_trajectories(2, 0.1)
+
+
+def assert_straight_kinematics_and_reproducibility():
+    first = build_straight(7)
+    second = build_straight(7)
+    different = build_straight(8)
+    for name in (
+        "ue_positions",
+        "ue_directions_rad",
+        "normalized_channels",
+        "true_channels",
+        "association_mask",
+    ):
+        assert np.array_equal(getattr(first, name), getattr(second, name))
+    assert not np.array_equal(first.ue_positions, different.ue_positions)
+    assert not np.array_equal(first.true_channels, different.true_channels)
+
+    steps = np.linalg.norm(np.diff(first.ue_positions, axis=1), axis=-1)
+    expected = first.ue_speeds_mps[:, None] * first.decision_period_s
+    assert np.max(np.abs(steps - expected)) < 1e-10
+    assert np.max(np.linalg.norm(first.ue_positions, axis=-1)) <= 100 + 1e-12
+    expected_path_loss = (
+        DIRECT_CHANNEL_FADING
+        * first.distances ** (-DIRECT_PATH_LOSS_EXPONENT)
+        / 10 ** DIRECT_CHANNEL_SCALE
     )
-    channels = loader.get_stacked_channels(trajectory_indices, time_indices)
-    association_mask = loader.association_mask[trajectory_indices]
-    model = node_update(
-        NUM_ANTENNAS, 6, PMAX, 64, NUM_AP, DEVICE
-    ).to(DEVICE)
-    model.eval()
-    with torch.no_grad():
-        beamformers = (
-            model(central, central_mask, training=True),
-            model(local, local_masks, training=False),
-            mrt_beamforming(channels, association_mask, PMAX, DEVICE),
-            rzf_beamforming(
-                channels, association_mask, PMAX, DEVICE, noise_power=1e-12
-            ),
-        )
-    for beamformer in beamformers:
-        assert beamformer.shape == (
-            BATCH_SIZE,
-            2 * NUM_ANTENNAS,
-            NUM_AP * NUM_USERS,
-        )
-        assert_mask_and_power(beamformer, association_mask)
-        outputs = loader.compute_loss(
-            beamformer,
-            DEVICE,
-            1e-12,
-            trajectory_indices,
-            time_indices,
-        )
-        assert all(torch.isfinite(output).all() for output in outputs)
+    assert np.array_equal(first.path_loss_factors, expected_path_loss)
+    assert np.allclose(
+        first.true_channels,
+        first.normalized_channels * first.path_loss_factors[..., None],
+    )
+    assert not hasattr(first, "stored_channels")
 
 
-def assert_channel_statistics():
-    expected = np.array([1.0, 0.999485, 0.949178, 0.666090])
-    actual = jakes_correlation(np.array([0, 3, 30, 80]) / 3.6)
+def assert_channel_contract():
+    expected = np.asarray((1.0, 0.999485, 0.949178, 0.666090))
+    actual = jakes_correlation(np.asarray((0, 3, 30, 80)) / 3.6)
     assert np.allclose(actual, expected, atol=1e-6, rtol=0)
+    for seed, speed_kmh in enumerate((0, 3, 30, 80)):
+        diagnostics = independent_channel_diagnostics(
+            speed_kmh / 3.6, sample_count=20000, seed=100 + seed
+        )
+        assert diagnostics["finite"]
+        assert abs(float(diagnostics["real_mean"])) <= 0.02
+        assert abs(float(diagnostics["imag_mean"])) <= 0.02
+        assert abs(float(diagnostics["real_variance"]) - 0.5) <= 0.02
+        assert abs(float(diagnostics["imag_variance"]) - 0.5) <= 0.02
+        assert float(diagnostics["max_ar1_error"]) <= 0.02
+        assert np.array_equal(
+            diagnostics["ar1_correlation"],
+            diagnostics["rho"] ** diagnostics["lags"],
+        )
 
+
+def assert_hotspot_contract():
     loader = MobilityEnvironment(
         1,
-        32,
-        episode_steps=500,
+        4,
+        episode_steps=2000,
         speed_kmh=30,
-        seed=21,
+        seed=0,
+        mobility_model=MOBILITY_HOTSPOT,
     ).generate_trajectories(2, 0.1)
-    diagnostics = loader.diagnostics(
-        lags=(1, 2, 5, 10), bootstrap_samples=200
-    )
-    error = np.abs(
-        diagnostics["empirical_correlation"]
-        - diagnostics["theoretical_correlation"]
-    )
-    assert np.all(error <= 0.02)
-    assert np.all(np.isfinite(diagnostics["bootstrap_95_ci"]))
-    assert np.all(np.isfinite(loader.true_channels))
-
-
-def assert_hotspot_contract_and_dynamics():
-    loader = build_hotspot_loader(31)
-    assert loader.mobility_model == MOBILITY_HOTSPOT
-    assert loader.hotspot_centers.shape == (3, 2)
-    assert loader.hotspot_state.shape == (16, 200, NUM_USERS)
-    assert loader.mobility_phase.shape == (16, 200, NUM_USERS)
-    assert loader.instantaneous_speeds_mps.shape == (16, 200, NUM_USERS)
+    assert loader.hotspot_state.shape == (4, 2000, 2)
+    assert loader.mobility_phase.shape == (4, 2000, 2)
     assert set(np.unique(loader.mobility_phase)) == {
         MOBILITY_PHASE_DWELL,
         MOBILITY_PHASE_TRANSIT,
     }
-    assert np.all((loader.hotspot_state >= 0) & (loader.hotspot_state < 3))
-    assert np.array_equal(loader.true_channels, loader.stored_channels)
-    assert np.allclose(loader.transition_matrix.sum(axis=1), 1)
-
-    step_distances = np.linalg.norm(np.diff(loader.ue_positions, axis=1), axis=-1)
-    step_limits = (
-        loader.instantaneous_speeds_mps[:, :-1]
-        * loader.decision_period_s
-    )
-    assert np.all(step_distances <= step_limits + 1e-10)
-    assert np.max(loader.instantaneous_speeds_mps) <= 10 + 1e-10
-    assert np.max(np.linalg.norm(loader.ue_positions, axis=-1)) <= 100 + 1e-12
-    assert np.allclose(
-        loader.rhos,
-        jakes_correlation(loader.instantaneous_speeds_mps),
-    )
-
-    diagnostics = loader.hotspot_diagnostics()
-    assert np.all(diagnostics["transition_counts"].sum(axis=1) > 0)
-    assert np.nanmax(
-        np.abs(
-            diagnostics["empirical_transition_matrix"]
-            - diagnostics["configured_transition_matrix"]
-        )
-    ) < 0.15
-    assert abs(float(diagnostics["dwell_mean_s"]) - 0.5) < 0.08
-    assert np.max(
-        np.abs(
-            diagnostics["clip_hotspot_occupancy"]
-            - diagnostics["stationary_occupancy_target"]
-        )
-    ) < 0.2
-    assert diagnostics["strongest_ap_change_count"].shape == (
-        16,
-        NUM_USERS,
-    )
-    assert diagnostics["fixed_serving_set_coverage"].shape == (
-        16,
-        NUM_USERS,
-    )
+    assert loader.hotspot_burn_in_s >= 120
+    clip_duration = (loader.episode_steps - 1) * loader.decision_period_s
+    assert np.all(loader.clip_start_times_s >= loader.hotspot_burn_in_s)
     assert np.all(
-        (diagnostics["fixed_serving_set_coverage"] >= 0)
-        & (diagnostics["fixed_serving_set_coverage"] <= 1)
+        loader.clip_start_times_s + clip_duration
+        <= loader.hotspot_burn_in_s + loader.hotspot_trace_duration_s + 1e-12
     )
+    diagnostics = loader.mobility_diagnostics()
+    assert diagnostics["max_position_radius_m"] <= 100 + 1e-12
+    assert diagnostics["max_step_limit_violation_m"] <= 1e-10
+    assert diagnostics["dwell_channel_max_abs_change"] == 0
     assert np.allclose(
         diagnostics["empirical_lag1_by_phase"],
-        diagnostics["theoretical_lag1_by_phase"],
-        atol=0.03,
+        diagnostics["ar1_lag1_by_phase"],
+        atol=0.02,
     )
 
-    channel_diagnostics = loader.diagnostics(
-        lags=(1, 2, 5), bootstrap_samples=100
-    )
-    assert np.max(
-        np.abs(
-            channel_diagnostics["empirical_correlation"]
-            - channel_diagnostics["theoretical_correlation"]
+    variants = ((0.2, 2.0, 2.5), (0.6, 5.0, 12.5), (0.8, 10.0, 50.0))
+    for stickiness, dwell_mean, residence_target in variants:
+        matrix = symmetric_transition_matrix(4, stickiness)
+        process = hotspot_process_diagnostics(
+            matrix,
+            dwell_mean,
+            2.0,
+            30 / 3.6,
+            seed=200,
+            minimum_events=10000,
+            minimum_outgoing_per_state=2000,
         )
-    ) < 0.03
+        assert process["event_count"] >= 10000
+        assert process["minimum_outgoing_event_count"] >= 2000
+        assert np.max(
+            np.abs(process["empirical_transition_matrix"] - matrix)
+        ) <= 0.05
+        assert np.max(np.abs(process["event_chain_occupancy"] - 0.25)) <= 0.03
+        assert abs(float(process["event_dwell_mean_s"]) / dwell_mean - 1) <= 0.05
+        assert np.isclose(
+            process["merged_residence_mean_target_s"], residence_target
+        )
+        assert abs(
+            float(process["merged_residence_mean_s"]) / residence_target - 1
+        ) <= 0.05
+        assert process["self_transition_motion_distance_max_m"] == 0
+        assert process["max_boundary_radius_m"] <= 45 + 1e-12
+        assert process["max_step_limit_violation_m"] <= 1e-10
+        assert process["transit_endpoint_error_max_m"] <= 1e-10
+        assert np.isclose(
+            process["natural_time_dwell_fraction"]
+            + process["natural_time_transit_fraction"],
+            1,
+        )
 
 
-def assert_hotspot_reproducibility():
-    first = build_hotspot_loader(41)
-    second = build_hotspot_loader(41)
-    different = build_hotspot_loader(42)
-    for name in (
-        "ue_positions",
-        "hotspot_state",
-        "mobility_phase",
-        "instantaneous_speeds_mps",
-        "dwell_durations_s",
-        "transition_from_states",
-        "transition_to_states",
-        "true_channels",
-    ):
-        assert np.array_equal(getattr(first, name), getattr(second, name))
-    assert not np.array_equal(first.hotspot_state, different.hotspot_state)
-    assert not np.array_equal(first.true_channels, different.true_channels)
-
-
-def assert_evaluator_contract():
+def assert_frozen_evaluator_contract():
+    assert CHECKPOINT.is_file()
     seed_everything(17)
-    trainer = Trainer(
-        M=NUM_ANTENNAS,
-        K=NUM_USERS,
-        batch_size=BATCH_SIZE,
-        n_iter=1,
-        pmax_dbm=15,
-        noise_power=1e-12,
+    loader = MobilityEnvironment(
+        2,
+        2,
+        episode_steps=8,
         speed_kmh=30,
-        episode_steps=4,
-        train_trajectories=2,
-        validation_trajectories=2,
-        test_trajectories=2,
-        eval_frame_batch_size=4,
-        eval_time_stride=1,
-        bootstrap_samples=10,
         seed=17,
-        device="cpu",
+    ).generate_trajectories(8, 0.1)
+    model = node_update(2, 6, PMAX, 64, NUM_AP, DEVICE)
+    load_frozen_model(model, CHECKPOINT, DEVICE)
+    assert not any(parameter.requires_grad for parameter in model.parameters())
+    evaluator = TrajectoryEvaluator(
+        model,
+        K=8,
+        pmax_w=PMAX,
+        num_ap=NUM_AP,
+        device=DEVICE,
+        noise_power=1e-12,
+        frame_batch_size=4,
+        time_stride=2,
     )
-    metrics, raw_metrics = trainer.eval(trainer.test_data)
-    assert metrics.keys() == EXPECTED_EVAL_METRICS.keys()
-    for metric, expected in EXPECTED_EVAL_METRICS.items():
-        assert np.isclose(metrics[metric], expected, atol=1e-6, rtol=0)
-    assert np.array_equal(raw_metrics["evaluation_time_indices"], np.arange(4))
+    summary, raw = evaluator.evaluate(loader)
+    assert np.array_equal(raw["evaluation_time_indices"], (0, 2, 4, 6))
+    for method in METHODS:
+        assert np.isfinite(summary[method])
+        assert np.isfinite(summary[f"{method}_p05_user_rate"])
+        assert raw[f"{method}_constraints_passed"]
+        assert raw[f"{method}_per_trajectory_user_time_average_rates"].shape == (
+            2,
+            8,
+        )
+    assert raw["shared_current_channel"]
+    assert raw["shared_fixed_association_mask"]
+
+
+def assert_evaluation_only_source():
+    source_dir = Path(__file__).resolve().parent
+    assert (source_dir / "model_2.py").read_bytes() == (
+        source_dir.parent / "stage1/model_2.py"
+    ).read_bytes()
+    source = "\n".join(
+        (source_dir / filename).read_text()
+        for filename in ("trainer_2.py", "evaluate.py")
+    )
+    assert "torch.optim" not in source
+    assert "SummaryWriter" not in source
+    assert not (source_dir / "train.py").exists()
 
 
 def main():
     assert MyDataLoader is MobilityEnvironment
-    assert_data_contract_and_dynamics()
-    assert_reproducibility_and_stationarity()
+    assert_copied_stage1_snapshot_path()
     assert_stage1_t0_compatibility()
-    assert_beamforming_contract()
-    assert_channel_statistics()
-    assert_hotspot_contract_and_dynamics()
-    assert_hotspot_reproducibility()
-    assert_evaluator_contract()
-    print("Stage 2 mobility checks passed.")
+    assert_straight_kinematics_and_reproducibility()
+    assert_channel_contract()
+    assert_hotspot_contract()
+    assert_frozen_evaluator_contract()
+    assert_evaluation_only_source()
+    print("Stage 2 mobility and frozen-evaluation checks passed.")
 
 
 if __name__ == "__main__":

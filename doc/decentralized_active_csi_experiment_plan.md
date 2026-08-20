@@ -1,304 +1,269 @@
-# 從 [A] 重現到 Decentralized Active-CSI RL：實驗計畫
+# 從 Snapshot Beamforming 到 Decentralized Active-CSI Control：整體實驗計畫
 
 ## Material Passport
 
 - Origin Skill: academic-research-suite / experiment-agent
 - Origin Mode: plan
 - Origin Date: 2026-08-18
-- Last Updated: 2026-08-19
-- Verification Status: ANALYZED（Stage 1A antenna/power sweeps 與 Stage 1B 5-seed full run 已完成；Stage 2A source/checks 已存在，frozen-checkpoint mobility evaluation 與 Stage 2B 尚未完成）
-- Version Label: decentralized_active_csi_plan_v4
+- Last Updated: 2026-08-20
+- Verification Status: REPLANNED（Stage 0–1B 已完成分析；Stage 2 新版計畫已凍結，source 尚待重寫與重跑）
+- Version Label: decentralized_active_csi_plan_v5_rewrite
 - Living Report: `doc/decentralized_active_csi_experiment_report.md`
+- Stage 2 Detail: `doc/stage2_mobility_implementation_plan.md`
 
 ## 1. 核心研究問題
 
-在每個 decision period 的 feedback budget 有限時，各 AP 如何利用 local CSI history、CSI age 與 previous association，控制：
+在每個 decision period 的 CSI feedback budget 有限時，各 AP 如何只利用 local observation、CSI age/history 與 previous association，決定：
 
-1. 哪些 AP–UE CSI 需要更新；
+1. 哪些 AP–UE CSI links 需要更新；
 2. 哪些 UE 由哪些 AP 服務；
+3. 如何在 decentralized execution 下維持長期 rate，同時控制 feedback 與 association switching。
 
-使長期 sum rate 提高，同時減少 association switching 與 feedback overhead。
+最終假說是：相較於固定週期或 myopic heuristics，利用 temporal information 的 decentralized policy 能在相同 hard feedback budget 下改善 long-term sum rate 或 rate–overhead trade-off。
 
-實驗原則：每一階段只加入一個主要變因；前一階段通過驗收後才往下做。
+這個假說不能由單一 mobility inference、單一 seed，或 centralized/decentralized snapshot gap 證明。整體流程先建立可信 baseline 與 environment，再分離 association、CSI scheduling 與 joint-control effects，最後才進行正式 robustness inference。
 
-## 2. 實驗順序總覽
+## 2. 設計原則
 
-| 階段 | 主要變因 | Association | CSI | Policy |
-|---|---|---|---|---|
-| 0 | 重現 [A] | 固定 | 即時 | Snapshot GNN，學習 $(W,\Theta,c)$ |
-| 1A | 忠實移除 RIS | 固定 | 即時 | 沿用 Stage 0 數值設定，學習 $(W,c)$ |
-| 1B | 校準 no-RIS 數值尺度 | 固定 | 即時 | Noise sensitivity，學習 $(W,c)$ |
-| 2 | UE mobility | 固定 | 全部即時更新 | Temporal environment |
-| 3 | 動態 association | 動態 | 全部即時更新 | Heuristic / RL |
-| 4 | Feedback budget | 固定 | 部分更新、其餘 stale | Scheduling policy |
-| 5 | 完整問題 | 動態 | 部分更新、其餘 stale | Decentralized RL |
-| 6 | 模型與 action ablation | 動態 | 受限 | 多種架構比較 |
-| 7 | 最終評估 | 動態 | 受限 | Robustness / scalability |
+- 每一階段只新增一個主要變因；其餘 channel、power、noise、mask 與 evaluator 儘量固定。
+- 「程式/環境可用」與「論文主張成立」使用不同 gates。Development gate 可以小而快；formal evidence 在方法凍結後一次完成。
+- 方法比較必須使用相同 channel realizations、mobility traces、association masks 與 power constraints。
+- Training、model selection 與 final evaluation 的 seeds/traces 分開；temporally correlated frames 不當作獨立樣本。
+- 結果不好不是改環境參數的理由。只有 contract、fairness、constraint 或 provenance 失敗才修正實作。
+- 保存所有失敗或被排除的 runs 與原因，不覆寫 raw artifacts。
 
-2026-08-19 gate 狀態：Stage 1A 已完成並確認為 noise-floor negative control；Stage 1B 的 `noise_power=1e-12`、5-seed、2000-iteration full run 通過 numerical/learning gate，可作 Stage 2 snapshot baseline。C/D mean gap 僅 0.101%，exact paired sign-flip $p=0.125$，因此不作穩健方向或等效主張；完整數值見 living report。
+## 3. 階段總覽與目前狀態
 
-## 3. 各階段工作與理由
+| Stage | 新增的主要變因 | Association | CSI availability | Model/Policy | 目前狀態 |
+|---|---|---|---|---|---|
+| 0 | 重現原 RIS 系統 | 固定 | current | Snapshot GNN，學習 $(W,\Theta,c)$ | 已完成正向控制 |
+| 1A | 移除 RIS | 固定 | current | Snapshot GNN，學習 $(W,c)$ | 已完成；noise-floor negative control |
+| 1B | 校準 no-RIS noise scale | 固定 | current | 同一 snapshot GNN | 已完成；`1e-12` gate 通過 |
+| 2 | Mobility environment | 固定於 $t=0$ | full current CSI | 凍結 Stage 1B model，inference-only | 新版計畫完成；source 待重寫 |
+| 3 | Dynamic association | 動態 | full current CSI | Heuristic / association policy | 待 Stage 2 |
+| 4 | Feedback budget 與 CSI aging | 固定 | 部分更新，其餘 stale | Scheduling policy | 待 Stage 2 |
+| 5 | Joint association + CSI update | 動態 | 受 budget 限制 | Decentralized temporal RL | 待 Stage 3/4 |
+| 6 | Observation/action/model ablation | 動態 | 受 budget 限制 | Snapshot、recurrent、joint variants | 待 Stage 5 |
+| 7 | Formal robustness/scalability | 依最終方法 | 依最終問題 | 所有凍結方法 | 最終 evidence stage |
 
-### Stage 0 — 重現 [A]
+## 4. 已建立的基線
 
-**做什麼**
+### Stage 0 — 原 RIS GNN 正向控制
 
-- 使用 [A] 的完整 RIS 系統、local CSI 定義、固定 association 與 centralized training/decentralized inference。
-- GNN 學習複數 precoder $W$、RIS phase shifts $\Theta$，以及每個 AP 的總功率使用比例 $c$；AP–UE association 不由 GNN 學習。
-- 先採主要設定：$L=5$、$K=8$、$M=2$、$R=4$、$N=30$、$P_{\max}=15$ dBm、$\rho=0.1$。
-- 訓練先採 6 層 GNN、hidden dimension 64、Adam learning rate $10^{-4}$、batch size 8、2000 iterations。
-- 重現 sum rate 對 AP antennas、transmit power 的趨勢，以及 centralized/decentralized 差距。
-- 固定資料生成、random seeds、訓練設定與 evaluation script。
+**目的**：確認原始 channel、rate、power constraint、local observation 與 centralized-training/decentralized-inference pipeline 可產生 meaningful-rate results。
 
-**為什麼**
+**固定內容**：5 APs、$K=8$、$M=2$、RIS path、固定 association；GNN 輸出 complex precoder $W$、RIS phase $\Theta$ 與 AP power fraction $c$。
 
-- 確認 channel、rate、power constraint、local observation 與 GNN 實作正確。
-- 建立後續修改的可信基準。
-
-**驗收條件**
-
-- 既有單一 seed 結果先作為正向控制並標明 $n=1$；需要論文級比較時再補足至少 5 個 seeds。
-- AP antennas 與 transmit power 趨勢須與 [A] 一致；不要求每個數值完全相同。
-- Power constraint、association mask 與 decentralized inference 均通過單元測試。
+**通關標準**：antenna/power 趨勢合理，power/mask/decentralized inference tests 通過。既有單一-seed結果只作正向控制，不延伸成統計主張。
 
 ### Stage 1A — 忠實移除 RIS
 
-**做什麼**
+**目的**：只移除 reflected path 與 RIS output，觀察原數值設定是否仍適合 direct-only system。
 
-- 只保留 direct AP–UE channel；移除 RIS nodes、phase output 與 CPU aggregation。
-- GNN 只學習複數 precoder $W$ 與每個 AP 的功率比例 $c$。$W$ 的 real/imaginary outputs 仍包含 beamforming amplitude 與 phase；只有 RIS phase $\Theta$ 被移除。
-- 保留 [A] 的固定 association 與 local-CSI decentralized inference。
-- 保留 Stage 0 的 channel scaling、`noise_power = 4e-4`、Adam learning rate $10^{-4}$、weight decay $10^{-6}$、batch size 8 與 2000 iterations。
-- 比較 centralized GNN、decentralized GNN，以及 MRT/RZF 等簡單 beamforming baseline。
+**固定內容**：保留 Stage 0 的 channel scale、`noise_power=4e-4`、optimizer 與 training protocol；GNN 只學習 $(W,c)$。
 
-**為什麼**
+**已知結論**：signal 落入 noise floor，sum-rate/task-gradient 幾乎消失，optimizer update 被 weight-decay contribution 主導。此結果保留為 negative control，不宣稱 decentralized 等同 centralized。
 
-- 建立「只移除 RIS、其他設定不變」的忠實 code ablation，判斷原設定在失去 reflected channel 後會發生什麼。
-- Stage 1A 是負向／失效控制；若落入 noise floor，仍保留結果，不回頭修改或挑選 seeds。
+### Stage 1B — No-RIS 數值尺度校準
 
-**驗收條件**
+**目的**：排除 Stage 1A 的 noise-scale confound，建立後續所有 stages 共用的 snapshot baseline。
 
-- 所有方法使用相同 association、channel samples 與 power constraint。
-- 完成預先排定的 5-seed antenna 與 power sweeps，保存 config、checkpoint、raw metrics 與 logs。
-- GNN 不必優於 MRT/RZF；MRT/RZF 僅作 numerical sanity check。
-- 不要求 centralized/decentralized gap 穩定或非零。若兩者因 task-gradient 消失而相同，結論必須標為 inconclusive，而不是宣稱 decentralized 等同 centralized。
+**主設定**：5 APs、$K=8$、$M=2$、$P_{\max}=15$ dBm、`noise_power=1e-12`、Stage 1 architecture 與固定 association。
 
-### Stage 1B — 校準 no-RIS 數值尺度
+**已通過 gate**：5 seeds、每 seed 2000 iterations 的 gradients、training curves、parameters、artifacts 與 final metrics 均 finite，且未重現 parameter collapse。Centralized/decentralized mean gap 很小，不能據此宣稱方向或等效；GNN 勝過 MRT/RZF 也不是本 gate 的必要條件。
 
-**做什麼**
+## 5. Stage 2 — Mobility Environment 與 Frozen Inference
 
-- 保持 Stage 1A 的 direct-channel model、$L=5$、$K=8$、$M=2$、$P_{\max}=15$ dBm、association mask、GNN architecture 與 centralized-training/decentralized-inference 定義。
-- 只將 noise 變成可設定參數，預先測試 `1e-11`、`1e-12`、`1e-13`（在目前程式 power convention 下分別等效為 $-80$、$-90$、$-100$ dBm）。主設定預先指定為中點 `1e-12`；另外兩點作 sensitivity analysis。
-- 先保持 Adam learning rate $10^{-4}$ 與 weight decay $10^{-6}$。不預設 loss scaling 或 gradient clipping。
-- 每個 noise 先以 seed 0 跑 200 iterations，記錄 task-gradient norm、$\lambda\lVert\theta\rVert_2$、兩者比例、parameter norm、near-zero parameter ratio 與 validation sum rate。
-- 通過 numerical gate 後，主設定跑 5 seeds；再進行 antenna 與 power sweeps。
+### 5.1 Stage 2 要證明什麼
 
-**文獻依據**
+Stage 2 只證明：
 
-- Hojatian et al. [B] 的 no-RIS decentralized beamforming 實驗使用 $-110$ 至 $-130$ dBW noise（即 $-80$ 至 $-100$ dBm），對應平均 SNR 約 3.1–23.1 dB，並使用 weight decay $10^{-6}$。
-- Tung et al. [C] 將 noise 正規化為 $\mathcal{CN}(0,1)$，再以 normalized SNR 表示功率，支持 channel、power 與 noise 必須使用一致的 normalization。
-- 上述數值是 Stage 1B 的外部先驗，不是跨 channel model 直接複製；最終仍以本程式的 received-power 與 gradient diagnostics 檢查尺度。
+1. straight-line 與 hotspot/semi-Markov mobility generators 正確；
+2. Stage 1B frozen snapshot model 可在這些新環境 zero-shot inference；
+3. fixed-association、full-current-CSI baseline 可供 Stage 3/4 接續使用；
+4. 結果 finite、constraint-valid，且能看出大致趨勢。
 
-**為什麼**
+Stage 2 不重新訓練，不做 matched adaptation，不做多-seed方法推論，也不要求 rate 隨 mobility 增加而單調下降。
 
-- Stage 1A 的 `noise_power = 4e-4` 約為 MRT desired received power 中位數的 $1.36\times10^8$ 倍，使 sum-rate 與 task gradient 幾乎為零。
-- Stage 1B 的目的只是排除 noise-floor confound，使 centralized/decentralized comparison 可辨識；不得為了製造 gap 或讓 GNN 勝過 MRT/RZF 而選參。
+### 5.2 共用設定
 
-**驗收條件**
+- 載入 Stage 1B seed-0 final checkpoint，完全凍結參數。
+- 5 APs、$K=8$、$M=2$、$P_{\max}=15$ dBm、`noise_power=1e-12`。
+- $\Delta t=1$ ms、$f_c=2.6$ GHz、2000 periods（2 s）。
+- Position-dependent Stage 1 path loss + first-order Gauss–Markov small-scale fading，one-step coefficient 由 $J_0(2\pi f_D\Delta t)$ 決定。
+- 每條 trajectory 只在 $t=0$ 建立 association，之後固定。
+- 每一期皆提供 current full CSI；C/D GNN、MRT、RZF 共用同一 frame 與 mask。
+- Seed 0、每 setting 10 trajectories、`eval_time_stride=10`。
 
-- Task-gradient norm 不得再落在 Stage 1A 的約 $10^{-7}$ 尺度；相對 Stage 0 初始 task-gradient 的比例應在 $0.1$ 至 $10$ 倍內。
-- $\lambda\lVert\theta\rVert_2/\lVert\nabla L_{\text{task}}\rVert_2 \le 10^{-2}$。這是工程 guard，不是文獻常數。
-- Training curve 不再維持 noise-floor 平線，模型參數與輸出不發生 Stage 1A 型 collapse。
-- GNN 不必優於 MRT/RZF；centralized/decentralized gap 的大小與正負也不是選參條件。
-- 所有方法繼續使用相同 channels、association masks、noise 與 per-AP power constraints。
+### 5.3 必跑矩陣
 
-### Stage 2A — Straight-line mobility，維持固定 association 與 full CSI
+| Substage | Mobility | Speeds | 完整 inference runs |
+|---|---|---|---:|
+| 2A | Constant-speed straight line | 0、30、80 km/h | 3 |
+| 2B | Hotspot semi-Markov | 3、30、80 km/h | 3 |
 
-**做什麼**
+Straight 3 km/h 只需 channel statistical test；hotspot 0 km/h 因無法合理 transit 而不執行。另跑 low-stickiness/short-dwell 與 high-stickiness/long-dwell 兩組 environment-only diagnostics，不跑完整 beamforming inference。若 Stage 3 需要 heterogeneous mobility，可追加一組 mixed 0/3/30/80 km/h smoke run，但不列為通關條件。
 
-- 使用獨立的 `code/stage2/` Stage 1 source-only baseline；不混入 results、checkpoints、logs 或 caches。完整規格見 `doc/stage2_mobility_implementation_plan.md`。
-- 主設定採 $\Delta t=1$ ms、$f_c=2.6$ GHz、2000 periods；每個 UE 在一個 episode 內以固定速度、固定方向走 straight-line segment。
-- 主速度固定為 0、3、30 km/h，另以 80 km/h 作 stress test；先測 homogeneous speed，再測 heterogeneous users。
-- Small-scale fading 使用 Deng et al. [E] 的 first-order stationary Gauss–Markov model，$\rho_k=J_0(2\pi f_{D,k}\Delta t)$；large-scale amplitude 只依 Stage 1 distance/path-loss convention 隨位置更新。
-- Association mask 只在 $t=0$ 依 Stage 1 規則建立一次，整條 trajectory 固定。
-- 同時保存 true CSI 與 AP 端 stored CSI；本階段每期全部 links 更新，因此兩者逐元素相同。
-- 主 gate 不加入新的 log-normal shadowing；通過後才以 Ammar et al. [F], [G] 的 spatially correlated shadowing 作獨立 sensitivity。
-- 開發期先凍結 Stage 1B checkpoints，evaluation-only 於 0/30/80 km/h trajectories；3 km/h 與多 seeds 在方法介面凍結後再補。
-- Mobility-specific matched retraining 不是主 gate；只在需要量化 domain-adaptation gain 時增加。
+### 5.4 Stage 2 gates
 
-**為什麼**
+- $t=0$ 與 Stage 1 paired compatibility；0 km/h trajectory 靜止。
+- Kinematics、boundary、reproducibility 與 path-loss formula 全部正確。
+- Normalized channel mean/variance finite 且符合 convention；empirical lag correlation 對理論 curve 的 maximum absolute error `<=0.02`。
+- Hotspot transition、dwell、occupancy、continuity、phase-specific speed/channel diagnostics 通過 tolerance。
+- Association 在 clip 內固定；四種方法共用 current CSI/mask；beamformers 符合 association 與 per-AP power limit。
+- 六組 inference 都完成並保存 config、compact metrics、diagnostics、source/checkpoint hashes 與 logs。
 
-- 先驗證時間演化，不讓 stale CSI 或 association decision 混入除錯。
-- 建立後續 CSI aging 的 ground truth。
-- 區分 millisecond-level CSI refresh 與 second-level handoff timescale，避免把 handoff 論文的 decision interval 直接套到 small-scale CSI aging。
+通過後立即進入 Stage 3 或 Stage 4。多 seeds、full stride、equivalence、method ranking與正式 speed/mobility robustness 統一延到 Stage 7。
 
-**驗收條件**
+完整環境規格、輸出 contract、runtime 與停止規則見 `doc/stage2_mobility_implementation_plan.md`。
 
-- Stage 2A 的 $t=0$ 與 Stage 1 在相同 positions、initial fading、association、beamformer 下通過 paired rate equivalence；$v=0$ 時單一 episode 的 position/channel 保持不變，跨 trajectories 的 initial distribution 與 Stage 1 相容。
-- Normalized small-scale channel 的 empirical lag-$\ell$ correlation 符合理論 $\rho_k^\ell$；主參數範圍內隨 lag 與速度上升而下降。
-- 每步位移、distance/path-loss、trajectory boundary、fixed association 與 per-AP power constraint 均通過測試。
-- Stored CSI 與 true CSI 每期完全相同；所有方法共用同一 current channel、mask、noise 與 power constraint。
-- Train/validation/test 按完整 trajectory 切分，禁止把同一 trajectory 的相鄰 frames 分到不同 splits。
-- 凍結 Stage 1B model 能在固定 seed、可重現的 0/30/80 km/h test traces 完成 centralized/decentralized/MRT/RZF evaluation，metrics finite 且 constraints 無違反，即通過 Stage 3 development gate。開發期可每 10 個 periods 評估一次以先看趨勢，但保留完整 traces；這不代表跨 speed traces 已嚴格配對，也不代表已通過多 seed、full-frame 論文 inference gate。
+## 6. Stage 3 — Dynamic Association with Full Current CSI
 
-### Stage 2B — Hotspot-aware mobility robustness
+### 6.1 目的
 
-**做什麼**
+在 CSI 完全可用時，單獨量化 mobility 造成的 association mismatch，以及 history/switching cost 對 serving-set decision 的影響。
 
-- 不取代 Stage 2A；在相同 channel、power/noise、fixed association、full current CSI 與模型設定下，加入外生 hotspot-aware Markov/semi-Markov mobility。
-- Hotspot state 由預先固定的 transition matrix 產生，另顯式保存 dwell duration；UE 以實體速度連續移動到下一 hotspot，不允許 teleportation。
-- 保留 1 ms small-scale channel block，但把 hotspot transition/dwell 放在較慢的 macro timescale。先生成 long macro trace，再依自然時間占比抽取 2 s dwell/transit clips。
-- 完成 straight/hotspot 的 $2\times2$ train/test matrix，以區分 matched training 與 distribution shift。
-- 開發門檻先用 frozen Stage 1B checkpoint 完成 paired straight/hotspot evaluation；$2\times2$ matched-training matrix 與 10 seeds 延後至 evidence gate。
-- 詳細模型、data contract、statistics 與 gates 見 `doc/stage2_mobility_implementation_plan.md`。
+### 6.2 新增內容
 
-**為什麼**
+- Association action、previous association、AP capacity 與 switching cost。
+- Baselines：fixed-$t=0$、current strongest-link、hysteresis、snapshot learned policy、history-based policy。
+- 先固定 beamforming implementation與 full-current-CSI availability，不加入 feedback budget。
 
-- Hsu et al. [I] 的 WLAN trace/model 與 González et al. [J] 的大規模手機資料均支持 frequent locations、location preference 與 revisit；Jiang et al. [K] 支持把 dwell 與 destination transition 放在較慢的 temporal model。
-- Stage 2A 的直線軌跡最適合驗證 channel implementation；Stage 2B 則檢查結論是否依賴單一路徑與近乎均質的 occupancy。
-- 本階段沒有 UE action/reward，因此正式名稱是 Markov/semi-Markov mobility，不稱 MDP。MDP/POMDP 留給 Stage 3 association 或後續 joint control。
+### 6.3 Gates
 
-**驗收條件**
+- 所有 serving sets 符合 AP capacity與最低/最高服務限制。
+- Switching penalty 增加時，switching rate應呈合理下降趨勢；若沒有，先檢查 reward/action mask。
+- Rate 必須使用 action 後同一期 true channel評估；不得讀取 future CSI。
+- Stage 2 中舊有的 current-RSSI reassociation、fixed-association regret與 strongest-AP changes在本階段才成為正式 diagnostics。
 
-- Transition、dwell、long-run occupancy、speed、boundary 與 position/channel continuity 均通過事前 tolerance。
-- 每個 clip 的 association mask 只在 $t=0$ 建立一次，`stored_channels == true_channels`；不提前加入 stale CSI、dynamic association 或 history observation。
-- Evidence gate 至少 10 個獨立 training seeds；以 seed/trajectory aggregate 作 paired inference，不把 temporally correlated frames 當獨立樣本。此項不阻擋 Stage 3 開發。
-- 主要 estimand 為 $(C-D)_{\mathrm{hotspot}}-(C-D)_{\mathrm{straight}}$；另報告方法排名、5th-percentile UE rate、strongest-AP changes 與 frozen-association regret。
-- 若 interaction 落在事前 practical-equivalence margin 且排名不變，Stage 2A 作主 baseline、Stage 2B 作 robustness；否則 Stage 3–5 必須共同報告兩種 mobility。
+## 7. Stage 4 — Feedback Budget 與 Stale CSI，固定 Association
 
-### Stage 3 — 動態 association，但仍提供 full current CSI
+### 7.1 目的
 
-**做什麼**
+單獨回答 active CSI acquisition 是否有效，不讓 association switching 混入。
 
-- 加入 association action、AP capacity、previous association 與 switching cost。
-- 比較 strongest-link、hysteresis、snapshot policy 與 history-based RL。
-- Beamformer 先固定，避免同時改變太多模組。
+### 7.2 新增內容
 
-**為什麼**
+- 每個 AP 每期 hard update budget $B_m$。
+- 未更新 links 保留 stored CSI，並更新 age與 update mask；true CSI只供 environment/reward/evaluation。
+- Baselines：random、round-robin、fixed-period、age-based、mobility-based scheduling。
 
-- 單獨驗證 association dynamics 與 switching penalty。
-- 判斷 history 在「沒有 CSI budget 問題」時能帶來多少效益。
+### 7.3 Gates
 
-**驗收條件**
+- Budget 足以更新全部 links 時，結果回到對應 Stage 2 full-current-CSI baseline。
+- Budget 降低時平均 CSI age 合理上升；每一步 update action符合 hard budget。
+- Policy只能讀 stored CSI/age；rate只由 true current CSI計算，禁止 leakage。
 
-- Switching penalty 增加時，切換次數應下降。
-- 所有 association 均符合 AP capacity 與服務限制。
+## 8. Stage 5 — Joint Decentralized Active-CSI Control
 
-### Stage 4 — 加入 feedback budget 與 stale CSI，但固定 association
+### 8.1 目的
 
-**做什麼**
+共同控制 CSI updates與 association，直接檢驗核心研究假說。
 
-- 對每個 AP 設 hard budget $B_m$；每期只能更新部分 AP–UE CSI。
-- 未更新的 CSI 保留舊值，並記錄 age、update mask 與 CSI history。
-- 比較 random、round-robin、fixed-period、age-based、mobility-based scheduling。
+### 8.2 Observation、action 與 reward
 
-**為什麼**
+- Local observation：stored local CSI、CSI age/history、previous update mask、previous association 與 local budget。
+- Action：選擇更新 links與serving users；透過 mask/projection保證budget與capacity constraints。
+- Reward：
 
-- 單獨量化 active CSI acquisition 的價值。
-- 排除 association switching，確認效能改善確實來自較好的 CSI 更新分配。
+$$
+r_t=R_{\mathrm{sum},t}-\lambda_{\mathrm{sw}}C_{\mathrm{sw},t}-\lambda_{\mathrm{fb}}C_{\mathrm{fb},t}.
+$$
 
-**驗收條件**
+若每期 feedback 是固定 hard budget，可移除 $C_{\mathrm{fb}}$ penalty，避免重複懲罰。先建立「heuristic scheduler + association policy」與「scheduler policy + heuristic association」等 modular baselines，再評估 joint policy。
 
-- Budget 可更新全部 links 時，結果應回到對應 mobility model 的 Stage 2A/2B full-CSI baseline。
-- Budget 降低時，平均 CSI age 上升；所有更新 action 均符合 hard budget。
+### 8.3 Gates
 
-### Stage 5 — 完整問題：共同控制 CSI updates 與 association
+- 所有 actions滿足 hard constraints。
+- True/stored CSI separation完整，無 future information。
+- 在 unlimited budget或zero switching penalty等邊界條件下，能回到對應 Stage 2/3 behavior。
 
-**做什麼**
+## 9. Stage 6 — Ablations 與 Action Architecture
 
-- 每個 AP 觀察 stored local CSI、CSI age/history、update mask、previous association 與 local budget。
-- Policy 共同控制 CSI updates 與 serving UEs；先不預設必須 simultaneous 或 two-stage。
-- Reward 使用 true channel 計算實際 sum rate：
+在主方法與訓練流程穩定後比較：
 
-  $$r_t=R_{\mathrm{sum},t}-\lambda_{\mathrm{sw}}C_{\mathrm{sw},t}-\lambda_{\mathrm{fb}}C_{\mathrm{fb},t}.$$
+- snapshot GNN vs. GNN+GRU/RNN；
+- 移除 CSI age、history、previous association；
+- simultaneous、causal two-stage、delayed或hierarchical actions；
+- centralized policy upper reference vs. decentralized execution；
+- parameter count/compute-matched variants，避免把更大模型誤認為 temporal information gain。
 
-- 若每期必須嚴格使用固定 budget，可移除 feedback penalty，只保留 hard constraint。
-- 先建立 modular baselines：更新 heuristic + association heuristic/RL，再訓練 joint decentralized RL。
+Stage 6 的目的是找出 gain來源並凍結最終方法，不在此擴大 mobility/network sweep。
 
-**為什麼**
+## 10. Stage 7 — Formal Robustness、Statistics 與 Scalability
 
-- 這一階段才直接檢驗核心假說：在相同 feedback budget 下，temporal decentralized policy 是否能維持較好的長期效能。
-- Modular baselines 可判斷 gain 來自 CSI scheduling、association，或兩者的交互作用。
+Stage 7 在方法、environment API、metrics與model-selection rule全部凍結後執行。
 
-**驗收條件**
+### 10.1 測試軸
 
-- Stored CSI 只能供 policy 使用；rate 必須由 true CSI 評估，避免資訊洩漏。
-- Budget、AP capacity 與 association constraints 由 action mask/projection 保證。
+- Straight與hotspot/semi-Markov mobility、代表速度與mixed-speed users。
+- Feedback budget、switching cost、channel coherence。
+- AP/UE數量、AP capacity與未見過的topologies。
+- Frozen Stage 1B snapshot、Stage 3/4 modular baselines、Stage 5 final method與Stage 6 selected ablations。
 
-### Stage 6 — Ablation 與 action architecture 比較
+### 10.2 統計設計
 
-**做什麼**
+- 至少 5 個獨立、paired seeds；若小樣本 exact test 或 CI precision 不足，依事前 power/precision rule 增加。
+- 同一 seed 中所有方法共用 traces 與 innovations；以 seed 或完整 trajectory aggregate 作統計單位。
+- 使用 paired effects、confidence intervals與effect sizes；多個主要comparisons作multiplicity control。
+- `eval_time_stride=1`只在正式結果確有需要時執行，stride sensitivity明確標示。
+- 不以「未顯著」宣稱等效；若需要 robustness/equivalence claim，事前登記 practical-equivalence margin。
 
-- 比較 snapshot GNN 與 GNN+GRU/RNN。
-- 分別移除 CSI age、history、previous association，確認各資訊的貢獻。
-- 比較 simultaneous、delayed、causal two-stage 或 hierarchical action designs。
-- 比較 centralized joint policy，作為 decentralized execution 的上界參考。
-
-**為什麼**
-
-- Action 的時間結構是待驗證的設計選項，不應在研究開始前鎖定。
-- Ablation 可證明效能不是只來自較大的模型或額外輸入。
-
-### Stage 7 — 最終 robustness 與 scalability
-
-**測試軸**
-
-- UE speed、straight/hotspot mobility model、feedback budget、switching cost。
-- AP/UE 數量、AP capacity、channel coherence。
-- 訓練 topology 與未見過的測試 topology。
-
-**主要 metrics**
+### 10.3 主要 metrics與圖表
 
 - Long-term average sum rate、5th-percentile UE rate。
-- Association switching rate、平均 CSI age、feedback 使用量。
-- Constraint violation、inference time、communication overhead。
+- Association switching rate、平均 CSI age、feedback usage與constraint violations。
+- Inference time、communication overhead與scalability。
+- Sum rate vs. feedback budget、rate–switching trade-off、speed × budget gain heatmap、network-size performance/cost curve。
 
-**主要圖表**
+## 11. Seeds 與計算資源策略
 
-1. Sum rate vs. feedback budget，不同 UE speeds 各一條曲線。
-2. Sum rate–switching trade-off。
-3. RL 相對 fixed-period/myopic baseline 的 gain heatmap：speed × budget。
-4. Network size 增加時的效能與 inference cost。
+| 階段 | Seeds/抽樣策略 | 可做的主張 |
+|---|---|---|
+| Implementation/unit tests | 固定 seed，小樣本 | Contract 與 reproducibility |
+| Stage 2 development | seed 0、10 trajectories、stride 10 | Environment可用、inference可跑、大致趨勢 |
+| Stage 3–6 development | 1–3 seeds或小型paired pilots | Debug、method selection，明確標為exploratory |
+| Stage 7 final evidence | 至少 5 個 paired seeds；必要時 full stride | 正式 method/robustness conclusions |
 
-## 4. 實驗控制規則
+不要求每個中間 stage 一開始就跑大量 seeds。最終比較仍須把 frozen Stage 1B baseline與所有入選方法放到相同 Stage 7 paired matrix中，確保沒有因延後而遺漏 baseline。
 
-- Development gate 可使用 seed-0 paired pilot 驗證 execution、constraints 與趨勢，但不作推論性主張。論文 evidence gate 每階段至少使用 5 個 random seeds；Stage 2B mobility-model comparison 至少使用 10 個 training seeds。
-- 方法比較使用相同 channel realizations 與 mobility traces。
-- 測 CSI scheduling 時先固定 beamformer；測 association 時先固定 CSI availability。
-- 每完成一階段，保存 config、checkpoint、raw logs 與繪圖 script。
-- Stage 1B 的 noise、optimizer 與 numerical gates 必須在查看 centralized/decentralized gap 前預先登記；不得依 gap、baseline 勝負或個別 seed 選參。
-- MRT/RZF 是 sanity-check baselines。GNN 勝過 MRT/RZF 不是 Stage 1 的驗收條件；是否確實收到可學習的 task gradient 才是 numerical gate。
-- 每次啟動、完成、中止或排除實驗，都更新 `doc/decentralized_active_csi_experiment_report.md`，記錄日期、設定、seeds、artifact path、狀態與原因，不覆寫 raw artifacts。
-- 若某階段未通過 sanity check，不進入下一階段。
+## 12. Artifact 與 Provenance 規則
 
-## 5. 最小可發表路徑
+每個 run 最少保存：
 
-最小主線為：Stage 0 → 1A → 1B → 2A → 2B → 4 → 5 → 6 → 7。
+- effective config、random seeds與evaluation indices；
+- source commit、dirty status、source SHA-256與checkpoint SHA-256；
+- raw per-seed/per-trajectory metrics、summary與completion status；
+- environment diagnostics與constraint checks；
+- stdout/stderr log與繪圖/彙整script。
 
-Stage 1A 保留忠實移除 RIS 的失效結果；Stage 1B 才是後續 Stage 2A/2B 的 no-RIS snapshot baseline。增加 AP/UE 數量只作 robustness test，不作為修復 noise 或 gradient 尺度的方法。
+Source snapshot 必須在 process 啟動前固定；不能在長時間 process 載入後再以可變動的 working tree hash 聲稱 provenance。被中止、不完整或 contract 版本不一致的 run 保留但排除於 inference，並在 living report 記錄理由。
 
-Stage 3 是重要的診斷實驗：它可顯示在 full CSI 下，history-based association 本身能帶來多少改善，避免把既有的 mobility-aware association 效果誤認為本題的主要創新。
+## 13. 執行路徑與決策點
 
-## Reference
+主開發順序：
 
-[A] W.-Y. Ting, R. Y. Chang, F.-T. Chien, T.-Y. Peng, and P.-H. Lin, “Decentralized Graph Neural Network-Based Joint Beamforming in Multi-RIS-Aided Cell-Free Networks,” *IEEE VTC*, September 2026.
+1. Stage 0 → 1A → 1B：baseline與數值尺度，已完成。
+2. Stage 2：重寫environment/evaluator，跑6組frozen inference，通過後停止擴張。
+3. Stage 3 與 Stage 4：分別隔離 association 與 CSI scheduling effects。
+4. Stage 5：joint decentralized control。
+5. Stage 6：ablation並凍結方法。
+6. Stage 7：一次完成paired multi-seed robustness與scalability evidence。
+
+Stage 2 不因多跑幾組只需約一小時，就升級成完整 statistics stage；它可以多覆蓋環境，但不重複支付之後仍須與 final methods 一起重跑的 multi-seed 成本。
+
+## References
+
+[A] W.-Y. Ting, R. Y. Chang, F.-T. Chien, T.-Y. Peng, and P.-H. Lin, “Decentralized Graph Neural Network-Based Joint Beamforming in Multi-RIS-Aided Cell-Free Networks,” *IEEE VTC*, Sep. 2026.
 
 [B] H. Hojatian, J. Nadal, J.-F. Frigon, and F. Leduc-Primeau, “Decentralized Beamforming for Cell-Free Massive MIMO with Unsupervised Learning,” *IEEE Communications Letters*, vol. 26, no. 5, pp. 1042–1046, May 2022. [Paper](https://arxiv.org/abs/2106.16194) · [Reference code](https://github.com/HamedHojatian/CF-mMIMO-HBF)
 
-[C] N. X. Tung, T. V. Chien, H. Q. Ngo, and W. J. Hwang, “Distributed Graph Neural Network Design for Sum Ergodic Spectral Efficiency Maximization in Cell-Free Massive MIMO,” *IEEE Transactions on Vehicular Technology*, vol. 74, no. 3, pp. 5181–5186, March 2025. [Paper](https://arxiv.org/abs/2411.02900)
+[C] N. X. Tung, T. V. Chien, H. Q. Ngo, and W. J. Hwang, “Distributed Graph Neural Network Design for Sum Ergodic Spectral Efficiency Maximization in Cell-Free Massive MIMO,” *IEEE Transactions on Vehicular Technology*, vol. 74, no. 3, pp. 5181–5186, Mar. 2025. [Paper](https://arxiv.org/abs/2411.02900)
 
-[D] S. Huang, Y. Ye, M. Xiao, H. V. Poor, and M. Skoglund, “Decentralized Beamforming Design for Intelligent Reflecting Surface-enhanced Cell-free Networks,” 2020. [Paper](https://arxiv.org/abs/2006.12238)
+[D] R. Deng, Z. Jiang, S. Zhou, and Z. Niu, “Intermittent CSI Update for Massive MIMO Systems With Heterogeneous User Mobility,” *IEEE Transactions on Communications*, vol. 67, no. 7, pp. 4811–4824, Jul. 2019. [DOI](https://doi.org/10.1109/TCOMM.2019.2911575)
 
-[E] R. Deng, Z. Jiang, S. Zhou, and Z. Niu, “Intermittent CSI Update for Massive MIMO Systems With Heterogeneous User Mobility,” *IEEE Transactions on Communications*, vol. 67, no. 7, pp. 4811–4824, July 2019. [DOI](https://doi.org/10.1109/TCOMM.2019.2911575) · [Author manuscript](https://network.ee.tsinghua.edu.cn/niulab/wp-content/uploads/2019/12/Intermittent-CSI-Update-for-Massive-MIMO-Systems-With-Heterogeneous-User-Mobility.pdf)
+[E] H. A. Ammar, R. Adve, S. Shahbazpanahi, G. Boudreau, and K. V. Srinivas, “Handoffs in User-Centric Cell-Free MIMO Networks: A POMDP Framework,” *IEEE Transactions on Wireless Communications*, vol. 23, no. 8, pp. 10319–10335, Aug. 2024. [Paper](https://arxiv.org/abs/2403.08900)
 
-[F] H. A. Ammar, R. Adve, S. Shahbazpanahi, G. Boudreau, and K. V. Srinivas, “Handoffs in User-Centric Cell-Free MIMO Networks: A POMDP Framework,” *IEEE Transactions on Wireless Communications*, vol. 23, no. 8, pp. 10319–10335, August 2024. [Paper](https://arxiv.org/abs/2403.08900)
+[F] W.-J. Hsu, T. Spyropoulos, K. Psounis, and A. Helmy, “Modeling Time-Variant User Mobility in Wireless Mobile Networks,” in *Proc. IEEE INFOCOM*, pp. 758–766, May 2007. [DOI](https://doi.org/10.1109/INFCOM.2007.94)
 
-[G] H. A. Ammar, R. Adve, S. Shahbazpanahi, G. Boudreau, and I. Bahceci, “Handoff Design in User-Centric Cell-Free Massive MIMO Networks Using DRL,” *IEEE Transactions on Communications*, vol. 73, no. 11, pp. 11368–11384, November 2025. [Paper](https://arxiv.org/abs/2507.20966)
-
-[H] 3GPP, “Study on Channel Model for Frequencies from 0.5 to 100 GHz,” TR 38.901, Release 18, v18.1.0, February 2026. [ETSI PDF](https://www.etsi.org/deliver/etsi_tr/138900_138999/138901/18.01.00_60/tr_138901v180100p.pdf)
-
-[I] W.-J. Hsu, T. Spyropoulos, K. Psounis, and A. Helmy, “Modeling Time-Variant User Mobility in Wireless Mobile Networks,” in *Proc. IEEE INFOCOM*, pp. 758–766, May 2007. [DOI](https://doi.org/10.1109/INFCOM.2007.94) · [Author manuscript](https://www.cise.ufl.edu/~helmy/papers/TVC-Infocom-07-published.pdf)
-
-[J] M. C. González, C. A. Hidalgo, and A.-L. Barabási, “Understanding Individual Human Mobility Patterns,” *Nature*, vol. 453, pp. 779–782, June 2008. [DOI](https://doi.org/10.1038/nature06958)
-
-[K] S. Jiang, Y. Yang, S. Gupta, D. Veneziano, S. Athavale, and M. C. González, “The TimeGeo Modeling Framework for Urban Mobility Without Travel Surveys,” *Proceedings of the National Academy of Sciences*, vol. 113, no. 37, pp. E5370–E5378, September 2016. [DOI](https://doi.org/10.1073/pnas.1524261113) · [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC5027456/)
+[G] M. C. González, C. A. Hidalgo, and A.-L. Barabási, “Understanding Individual Human Mobility Patterns,” *Nature*, vol. 453, pp. 779–782, Jun. 2008. [DOI](https://doi.org/10.1038/nature06958)

@@ -6,8 +6,8 @@
 - Origin Mode: validate（living experiment report）
 - Origin Date: 2026-08-18
 - Last Updated: 2026-08-20
-- Verification Status: ANALYZED（Stage 0、Stage 1A antenna/power sweeps、Stage 1B calibration 與 5-seed full run；Stage 2A frozen-checkpoint development pilot 與 Stage 2B hotspot environment pilot 已完成分析）；未進行獨立重新訓練，Stage 2 evidence gates 亦未完成，不標為 VERIFIED
-- Version Label: decentralized_active_csi_report_v5
+- Verification Status: ANALYZED（Stage 0、Stage 1A antenna/power sweeps、Stage 1B calibration 與 5-seed full run，以及舊版 Stage 2 development pilots 已完成分析；新版 Stage 2 已重新規劃，source 尚待重寫與重跑）；未進行獨立重新訓練，不標為 VERIFIED
+- Version Label: decentralized_active_csi_report_v6
 - Plan: `doc/decentralized_active_csi_experiment_plan.md`
 
 ## 1. 報告範圍
@@ -19,8 +19,9 @@
 - Stage 0：原版有 RIS 的正向控制。
 - Stage 1A：只移除 RIS、其他數值設定不變的忠實 ablation。
 - Stage 1B：三個 noise values 的 seed-0 calibration pilot 與主設定 `1e-12` 的 5-seed full run 均已完成；numerical/learning gate 通過，但 C/D 方向仍不作穩健結論。
-- Stage 2A：frozen Stage 1B checkpoint 的 0/30/80 km/h evaluation-only development pilot 已完成；環境、channel、fixed-association 與 full-current-CSI gates 通過，但只有 seed 0，不作 evidence-level inference。
-- Stage 2B：同一 frozen checkpoint 的 30 km/h hotspot semi-Markov environment pilot 已完成；trace/channel gates 通過，但 straight/hotspot 尚非 evidence-level paired comparison。
+- Stage 2A（舊版 pilot）：frozen Stage 1B checkpoint 的 0/30/80 km/h evaluation-only development pilot 已完成；其結果保留作新版設計與 runtime reference，不自動視為新版 Stage 2 通關。
+- Stage 2B（舊版 pilot）：同一 frozen checkpoint 的 30 km/h hotspot semi-Markov environment pilot 已完成；trace/channel gates 通過，但只作 descriptive observation。
+- Stage 2（新版）：重新定義為 mobility environment qualification + frozen-model zero-shot inference；不訓練、不作多-seed inference，必跑 straight 0/30/80 與 hotspot 3/30/80 km/h。
 
 ## 2. 原版與目前 GNN 學習內容
 
@@ -54,9 +55,10 @@ Centralized 與 decentralized 使用同一組已訓練參數。差別只在 infe
 | Stage 1A power sweep，$P_{\max}=5,\ldots,35$ dBm | 已完成 | 5/設定 | 7 summaries、35 configs/checkpoints/final evaluations/logs 均完整 |
 | Stage 1B calibration pilot | 已完成 | seed 0 | `1e-11`、`1e-12`、`1e-13` 各 200 iterations；三者皆通過 numerical gate |
 | Stage 1B main full run | 已完成，exit code 0 | 5 seeds（0–4） | `noise_power=1e-12`、每 seed 2000 iterations；5 組 artifacts 完整且 finite |
-| Stage 2A speed-0 matched training | run0 artifacts 完成但不納入 adaptation inference；run1 未完成 | seed 0 完成 | 執行期間 source 被更新，實際載入的舊 evaluator 與 config 所記錄的 disk hashes/output contract 不一致；其餘 runs 已停止 |
-| Stage 2A frozen Stage 1B mobility pilot | Development gate 完成 | seed 0 | evaluation-only；0/30/80 km/h，各 10 test trajectories、每 10 periods 評估一次；artifacts 完整且 finite |
-| Stage 2B frozen Stage 1B hotspot pilot | Environment development gate 完成 | seed 0 | 30 km/h hotspot semi-Markov；10 test trajectories、`eval_time_stride=10`；trace/channel diagnostics 通過 |
+| Stage 2A speed-0 matched training（舊版） | run0 artifacts 完成但不納入 adaptation inference；run1 未完成 | seed 0 完成 | 執行期間 source 被更新，實際載入的舊 evaluator 與 config 所記錄的 disk hashes/output contract 不一致；新版 Stage 2 已移除 training |
+| Stage 2A frozen Stage 1B mobility pilot（舊版） | Historical development gate 完成 | seed 0 | evaluation-only；0/30/80 km/h，各 10 test trajectories、每 10 periods 評估一次；artifacts 完整且 finite |
+| Stage 2B frozen Stage 1B hotspot pilot（舊版） | Historical environment gate 完成 | seed 0 | 30 km/h hotspot semi-Markov；10 test trajectories、`eval_time_stride=10`；trace/channel diagnostics 通過 |
+| Stage 2 rewrite | 計畫完成，source 待重寫 | development 使用 seed 0 | evaluation-only；新版 mandatory matrix 為 straight 0/30/80 + hotspot 3/30/80 km/h；formal multi-seed evidence 延至 Stage 7 |
 
 ## 4. Stage 0：原版正向控制
 
@@ -355,9 +357,11 @@ Centralized 與 decentralized GNN 對 MRT 的 mean improvement 分別為 4.28% �
 - Fallacy scan coverage：11/11。Simpson、ecological、Berkson 與 collider fallacies 未被這個 paired-seed design 觸發；base-rate neglect、regression to the mean 與 survivorship bias 不適用；所有事前登記 settings/seeds 皆已報告，未發現 look-elsewhere 或 garden-of-forking-paths 的選擇性報告；本報告不作 observational causal 或 reverse-causality 主張。
 - Reproducibility method：本次只讀取遠端 raw artifacts、config、log 與 checkpoint diagnostics，未獨立重新訓練；因此狀態是 `ANALYZED`，獨立 reproducibility verdict 為 `CANNOT_VERIFY`。
 
-## 7. Stage 2：mobility development pilots
+## 7. Stage 2：舊版 mobility development pilots
 
 ### 7.1 Evaluation-first transition 與固定設定
+
+本節完整保留 2026-08-19 舊版 Stage 2 source 與 output contract 產生的結果，作為新版 Stage 2 的設計、runtime 與 regression reference。2026-08-20 重新規劃後，舊 source 已退出目前工作樹；因此本節的 historical gate 不自動轉移到新版實作，新版 source 完成後仍需依 `doc/stage2_mobility_implementation_plan.md` 重跑 mandatory matrix。
 
 原始 Stage 2 sweep 為 4 個 speeds × 5 seeds，每個 setting 都重新訓練 2000 iterations。第一個 speed-0 run 在 2026-08-19 啟動後，檢查發現 `train_trajectories=8`、`episode_steps=2000` 在 speed 0 其實只有 8 個不同的 geometry/channel cases；16,000 個可抽的 `(trajectory,time)` indices 只是在時間軸重複相同 snapshots，training diversity 遠低於 Stage 1 每 iteration 重新抽樣的流程。因此 development gate 改為凍結 Stage 1B seed-0 checkpoint，只評估新 mobility environments，不先重新訓練。
 
@@ -406,9 +410,9 @@ Straight-line pilot 中 regret 隨 30→80 km/h 增加，且 mean fixed-serving-
 
 Hotspot diagnostics 額外顯示：empirical occupancy 為 `[0.2523,0.2549,0.2382,0.2547]`，距 stationary target `[0.25,0.25,0.25,0.25]` 的最大偏差為 0.0118；2888 個 dwell events 的 mean 為 4.974 s；empirical transition matrix 與 configured matrix 的最大元素差為 0.034。Dwell/transit empirical lag-1 correlation 為 0.999997/0.949236，對應理論值 0.999995/0.949188。這些結果通過 Stage 2B trace、physical continuity 與 time-varying channel gates。
 
-遠端 frozen pilot 共保存 37 個 config/summary/raw/environment/diagnostic artifacts，logs 未發現 traceback、error、NaN、Inf、OOM、killed 或 failed 記錄。目前本地與遠端六個 Stage 2 source files 的 SHA-256 均與 frozen-run configs 完全一致；在遠端以相同 source 執行 `test_stage2.py`，輸出 `Stage 2 mobility checks passed.`。
+遠端 frozen pilot 共保存 37 個 config/summary/raw/environment/diagnostic artifacts，logs 未發現 traceback、error、NaN、Inf、OOM、killed 或 failed 記錄。在 2026-08-20 provenance audit 當下，本地與遠端六個舊版 Stage 2 source files 的 SHA-256 均與 frozen-run configs 完全一致；在遠端以相同 source 執行 `test_stage2.py`，輸出 `Stage 2 mobility checks passed.`。目前舊版 local source 已退出工作樹以準備重寫，所以這項敘述只記錄當時的稽核結果，不表示新版 source 已存在或已驗證。
 
-**Decision：Stage 2A development gate 通過；Stage 2B environment development gate 通過。** 這代表 mobility/channel implementation、fixed association、full current CSI 與 evaluation pipeline 可供 Stage 3 開發使用，不代表 3 km/h、跨 seed 或 full-stride evidence gates 已完成。
+**Historical decision：舊版 Stage 2A development gate 與 Stage 2B environment gate 通過。** 這證明當時的 mobility/channel prototype 能執行，也提供了新版設計依據；新版 Stage 2 採新的精簡 contract 與六組 inference matrix，必須重跑後才能通關。
 
 ### 7.5 Matched speed-0 run 的 provenance anomaly
 
@@ -416,7 +420,7 @@ Hotspot diagnostics 額外顯示：empirical occupancy 為 `[0.2523,0.2549,0.238
 
 更重要的是，該 run 的 config 與 raw artifacts 使用舊版 output contract：沒有 `execution_mode`、`fixed_association_regret`、dynamic-rate arrays 或 `evaluation_time_indices`，但 `source_sha256` 卻記錄了具備這些欄位的目前新版 `trainer_2.py`。Run1 也只有 config、BS array 與不完整 TensorBoard event，沒有 checkpoint 或 final evaluation。這組 evidence 顯示長時間執行中的 Python process 載入舊版 in-memory code 後，disk source 曾被更新，導致「實際執行 code」與「結束時/執行中讀取的 disk hashes」不一致。
 
-因此 matched run0 只保留為 legacy diagnostic，不與 frozen pilot 計算 adaptation gain，也不納入 Stage 2 gate。若未來需要 matched-training comparison，必須從乾淨、凍結且獨立 staged 的 source 重跑，並在 process 啟動前保存 source snapshot，而不只在 config 中即時 hash 可變動的工作目錄。
+因此 matched run0 只保留為 legacy diagnostic，不與 frozen pilot 計算 adaptation gain，也不納入 Stage 2 gate。新版 Stage 2 不再進行 matched training；若未來另立 adaptation study，必須從乾淨、凍結且獨立 staged 的 source 重跑，並在 process 啟動前保存 source snapshot，而不只在 config 中即時 hash 可變動的工作目錄。
 
 ### 7.6 Statistical validation 與 reproducibility boundary
 
@@ -433,7 +437,7 @@ Hotspot diagnostics 額外顯示：empirical occupancy 為 `[0.2523,0.2549,0.238
 
 Fallacy scan coverage 為 11/11。未將不同 environments pooled，避免方法排名反轉形成 Simpson-type 誤讀；沒有由 trajectory aggregate 推論單一 UE、filtered sample、collider control、diagnostic base rate、extreme-case pre/post 或 reverse-causality 問題。Matched sweep 若只保留完成的 run0 會形成 survivorship bias，因此已排除；多設定/多指標的 look-elsewhere risk 與未完成 evidence pairing 的 garden-of-forking-paths/causal overclaim risk 則以 `CAUTION` 標記。Mobility traces 為外生生成，rate 不回饋到 transition，因此不作 reverse-causality 主張。
 
-本次驗證重跑了相同 source 的 Stage 2 contract tests，但沒有重新執行完整 GPU frozen evaluations 或獨立 matched training；整體 verification status 維持 `ANALYZED`，numerical reproducibility verdict 為 `CANNOT_VERIFY`。Stage 2A evidence gate 仍需補 3 km/h、至少 5 seeds 與 `eval_time_stride=1`；Stage 2B evidence gate 仍需 paired seeds 與預先登記的 train/test mobility matrix。
+本次驗證重跑了相同 source 的舊版 Stage 2 contract tests，但沒有重新執行完整 GPU frozen evaluations 或獨立 matched training；整體 verification status 維持 `ANALYZED`，numerical reproducibility verdict 為 `CANNOT_VERIFY`。舊計畫所列的 straight 3 km/h full inference、Stage 2 多 seeds、`eval_time_stride=1` 與 straight/hotspot train-test matrix 已被新版計畫取代：Stage 2 只做 seed-0 development validation，正式 paired multi-seed/full-stride robustness 一律延到 Stage 7。
 
 ## 8. Current Interpretation
 
@@ -443,10 +447,11 @@ Fallacy scan coverage 為 11/11。未將不同 environments pooled，避免方�
 4. `1e-12` 是事前指定的 literature-grounded 中點，不是根據 centralized/decentralized gap 或 baseline 勝負事後挑選。`1e-11` 與 `1e-13` 只證明結論對相鄰 noise scale 的 numerical sensitivity。
 5. Stage 1B full run 的 C − D 在 4/5 seeds 為正，但 mean gap 僅 0.0100（0.101%）且 exact paired sign-flip $p=0.125$；這不支持穩健優勢，也不支持等效結論。
 6. 2000 iterations 後 centralized/decentralized GNN 的 mean rate 比 MRT 高 4.28%/4.17%，但比 RZF 低 1.82%/1.92%。GNN 是否超越 baselines 不是 Stage 1B gate；增加 AP/UE 數量只能作 robustness test，不能當作修復 noise scale 的方法。
-7. Stage 2A frozen-checkpoint development gate 已通過。0/30/80 km/h 的 environment/channel contracts 均有效，但 full current CSI 下不預期 sum rate 隨速度單調下降；目前跨 speed trajectories 也未配對，不能把 observed means 作 causal speed effect。
-8. Straight-line fixed-association regret 從 30 到 80 km/h 增加，支持 Stage 3 將 dynamic association 作為下一個獨立變因；這項設計決策來自 association mismatch diagnostics，不來自某個方法勝負。
-9. Stage 2B hotspot trace/channel gates 通過。Hotspot 相對 straight 30 km/h 的四方法 rate 都較低，但 C − D interaction 近乎為零，方法排名中的 GNN/MRT 次序則反轉；目前只作 development-level descriptive observation。
-10. 舊 matched speed-0 run 的 actual loaded code 與記錄 source hashes 不一致，且 sweep 只完成 run0；它不能支持 adaptation gain。Matched retraining 只有在乾淨 source snapshot、paired evaluation 與多 seeds 下重跑後才可納入結論。
+7. 舊版 Stage 2A frozen pilot 的 0/30/80 km/h environment/channel contracts 通過，但 full current CSI 下不預期 sum rate 隨速度單調下降；跨 speed trajectories 也未配對，不能把 observed means 作 causal speed effect。新版 Stage 2 因此只要求 coarse trend，不設單調性能 gate。
+8. 舊 straight-line fixed-association regret 從 30 到 80 km/h 增加，支持 Stage 3 將 dynamic association 作為下一個獨立變因；新版 Stage 2 不再計算 current-RSSI reassociation 或 regret，以免提前混入 Stage 3 的變因。
+9. 舊版 Stage 2B hotspot trace/channel gates 通過。Hotspot 相對 straight 30 km/h 的四方法 rate 都較低，但 C − D interaction 近乎為零，方法排名中的 GNN/MRT 次序反轉；這些都只作 descriptive observation。新版 Stage 2 保留 hotspot，並擴成 3/30/80 km/h 三組 inference 加兩組 environment-only diagnostics。
+10. 舊 matched speed-0 run 的 actual loaded code 與記錄 source hashes 不一致，且 sweep 只完成 run0；它不能支持 adaptation gain。新版 Stage 2 已完全移除 training/matched-adaptation scope。
+11. 新版 Stage 2 的正式決策是「environment qualification + frozen-model zero-shot inference」。Development 使用 seed 0 已足夠；至少 5 個 paired seeds、full stride、方法排名與 mobility robustness 推論等 Stage 3–6 方法凍結後，在 Stage 7 一次完成。
 
 ## 9. Artifact Index
 
@@ -463,10 +468,10 @@ Fallacy scan coverage 為 11/11。未將不同 environments pooled，避免方�
 | Stage 1B remote staged source | `lab301-5090:~/ThomasLai/code/stage1b_full_source/` |
 | Stage 1B remote completion status | `lab301-5090:~/ThomasLai/code/stage1/stage1b_full_noise_1e-12.status`；completed 2026-08-19 04:54:30 +08:00，exit code 0 |
 | Stage 1B remote log / results | `lab301-5090:~/ThomasLai/code/stage1/stage1b_full_noise_1e-12.log`；`lab301-5090:~/ThomasLai/code/stage1/results_stage1b_full_noise_1e-12/` |
-| Stage 2 implementation plan | `doc/stage2_mobility_implementation_plan.md` |
+| Stage 2 rewritten implementation plan | `doc/stage2_mobility_implementation_plan.md` |
 | Stage 2A matched speed-0 legacy run | `lab301-5090:~/ThomasLai/code/stage2/results_stage2_speed_0/speed0_M2_K8_P15/`；run0 完成、run1 不完整；因 provenance anomaly 排除於 adaptation inference |
-| Stage 2A frozen pilot log / results | `lab301-5090:~/ThomasLai/code/stage2/stage2a_frozen_stage1_eval.log`；`lab301-5090:~/ThomasLai/code/stage2/results_stage2a_frozen_stage1_seed0_speed_{0,30,80}/` |
-| Stage 2B hotspot pilot log / results | `lab301-5090:~/ThomasLai/code/stage2/stage2b_frozen_stage1_seed0_speed30.log`；`lab301-5090:~/ThomasLai/code/stage2/results_stage2b_frozen_stage1_seed0_speed_30/` |
+| Stage 2A legacy frozen pilot log / results | `lab301-5090:~/ThomasLai/code/stage2/stage2a_frozen_stage1_eval.log`；`lab301-5090:~/ThomasLai/code/stage2/results_stage2a_frozen_stage1_seed0_speed_{0,30,80}/` |
+| Stage 2B legacy hotspot pilot log / results | `lab301-5090:~/ThomasLai/code/stage2/stage2b_frozen_stage1_seed0_speed30.log`；`lab301-5090:~/ThomasLai/code/stage2/results_stage2b_frozen_stage1_seed0_speed_30/` |
 | Related-work review | `doc/related_work_decentralized_active_csi.md` |
 
 ## 10. Experiment Log
@@ -487,7 +492,8 @@ Fallacy scan coverage 為 11/11。未將不同 environments pooled，避免方�
 | 2026-08-19 | Stage 2A | speed-0 matched-training transition | Run0 completed; run1 incomplete; excluded from inference | Run0 有 final artifacts，但 actual in-memory evaluator 與 config source hashes/output contract 不一致；不計算 adaptation gain |
 | 2026-08-19 | Stage 2A | Frozen Stage 1B evaluation-first pilot | Complete, seed 0 | 0/30/80 km/h、各 10 trajectories、`eval_time_stride=10`；三組 artifacts 完整且 finite |
 | 2026-08-19 | Stage 2B | Frozen Stage 1B hotspot pilot | Complete, seed 0 | 30 km/h hotspot semi-Markov；trace、continuity、channel、fixed-association 與 full-CSI gates 通過 |
-| 2026-08-20 | Stage 2 | Result and provenance audit | Development gates pass; evidence gates pending | 遠端 source hash matching、37 frozen artifacts、logs 與 raw diagnostics 完整檢查；遠端 `test_stage2.py` 通過；無 active Stage 2 process |
+| 2026-08-20 | Stage 2 | Result and provenance audit | Historical development gates pass | 遠端 source hash matching、37 frozen artifacts、logs 與 raw diagnostics 完整檢查；遠端 `test_stage2.py` 通過；無 active Stage 2 process；後續 requirements 已由新版計畫取代 |
+| 2026-08-20 | Stage 2 | Experiment plan rewritten | Plan complete; implementation pending | 定義為 environment qualification + frozen inference；mandatory matrix 改為 straight 0/30/80 與 hotspot 3/30/80；多 seeds/full stride/formal robustness 延至 Stage 7 |
 
 ## 11. Next Update Checklist
 
@@ -501,6 +507,11 @@ Fallacy scan coverage 為 11/11。未將不同 environments pooled，避免方�
 - [x] 完成 0/30/80 km/h frozen Stage 1B checkpoint pilot，確認 environment/channel/fixed-association/full-CSI gates 與 artifact completeness。
 - [x] 完成 Stage 2B 30 km/h hotspot development pilot，檢查 occupancy、transition、dwell、continuity 與 phase-specific channel diagnostics。
 - [x] 稽核 speed-0 matched run；記錄 run0 provenance anomaly 與 run1 incomplete artifacts，並排除 adaptation inference。
-- [ ] Stage 2A evidence gate：補 3 km/h、至少 5 seeds、paired evaluation 與 `eval_time_stride=1`。
-- [ ] Stage 2B evidence gate：完成 paired seeds 與預先登記的 straight/hotspot train-test matrix。
-- [ ] 若需將 verification status 從 `ANALYZED` 升為 `VERIFIED`，在保存原 artifacts 的前提下進行一次獨立重新訓練與 tolerance comparison。
+- [x] 重寫 Stage 2：只保留 mobility environment qualification、Stage 1B frozen-model zero-shot inference 與 coarse trend；移除 training、matched-adaptation 與 Stage 2 formal inference。
+- [x] 將 hotspot 保留於 Stage 2，mandatory inference 擴為 3/30/80 km/h；另規劃 low/high stickiness/dwell 的 environment-only diagnostics。
+- [ ] 依新版 contract 重建 evaluation-only `code/stage2/`，啟動前保存 source snapshot 與 checkpoint hash。
+- [ ] 通過 Stage 1 compatibility、kinematics、channel、hotspot process、fairness、power/mask 與 reproducibility tests。
+- [ ] 重跑新版 straight 0/30/80 與 hotspot 3/30/80 km/h 六組 seed-0 inference，保存 compact artifacts。
+- [ ] 若 Stage 3 一開始需要 heterogeneous mobility，再追加 mixed 0/3/30/80 km/h smoke run；否則不跑。
+- [ ] Stage 3–6 方法凍結後，在 Stage 7 對所有方法與 frozen Stage 1B baseline 一次執行至少 5 個 paired seeds、必要的 full-stride robustness matrix。
+- [ ] 若需將整體 verification status 從 `ANALYZED` 升為 `VERIFIED`，在保存歷史 artifacts 的前提下對新版 pipeline 進行獨立重跑與 tolerance comparison。

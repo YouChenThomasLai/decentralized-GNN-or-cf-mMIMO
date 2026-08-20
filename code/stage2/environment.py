@@ -7,6 +7,8 @@ from utils_return_indivial_rates import (
     cal_loss,
     complex_normal,
     gen_fixed_location,
+    gen_location,
+    generate_channel,
     generate_temporal_channels,
     temporal_channel_diagnostics,
 )
@@ -20,6 +22,170 @@ MOBILITY_PHASE_LABELS = np.asarray(("dwell", "transit"))
 DEFAULT_HOTSPOT_CENTERS = np.asarray(
     ((35.0, 0.0), (0.0, 35.0), (-35.0, 0.0), (0.0, -35.0))
 )
+
+
+def symmetric_transition_matrix(hotspot_count, stickiness):
+    if hotspot_count <= 0 or not 0 <= stickiness <= 1:
+        raise ValueError("Invalid hotspot count or stickiness")
+    if hotspot_count == 1:
+        return np.ones((1, 1))
+    matrix = np.full(
+        (hotspot_count, hotspot_count),
+        (1 - stickiness) / (hotspot_count - 1),
+    )
+    np.fill_diagonal(matrix, stickiness)
+    return matrix
+
+
+def stationary_distribution(transition_matrix):
+    matrix = np.asarray(transition_matrix, dtype=np.float64)
+    system = np.vstack(
+        (matrix.T - np.eye(len(matrix)), np.ones(len(matrix)))
+    )
+    return np.linalg.lstsq(
+        system, np.append(np.zeros(len(matrix)), 1.0), rcond=None
+    )[0]
+
+
+def _sample_disk(rng, center, radius_m):
+    angle = rng.uniform(0, 2 * np.pi)
+    radius = radius_m * np.sqrt(rng.uniform())
+    return np.asarray(center) + radius * np.asarray(
+        (np.cos(angle), np.sin(angle))
+    )
+
+
+def hotspot_process_diagnostics(
+    transition_matrix,
+    dwell_mean_s,
+    dwell_shape,
+    transit_speed_mps,
+    *,
+    centers=DEFAULT_HOTSPOT_CENTERS,
+    radius_m=10.0,
+    seed=0,
+    minimum_events=10000,
+    minimum_outgoing_per_state=2000,
+    burn_in_events=1000,
+):
+    """Run the independent long-stream Gate 2.3 diagnostic."""
+    matrix = np.asarray(transition_matrix, dtype=np.float64)
+    centers = np.asarray(centers, dtype=np.float64)
+    if transit_speed_mps <= 0:
+        raise ValueError("Hotspot transit speed must be positive")
+    rng = np.random.default_rng(seed)
+    state = int(rng.integers(len(centers)))
+    position = _sample_disk(rng, centers[state], radius_m)
+
+    def event_step(state, position):
+        dwell = max(
+            float(rng.gamma(dwell_shape, dwell_mean_s / dwell_shape)),
+            np.finfo(np.float64).eps,
+        )
+        next_state = int(rng.choice(len(centers), p=matrix[state]))
+        distance = 0.0
+        self_motion = 0.0
+        max_radius = float(np.linalg.norm(position))
+        if next_state != state:
+            target = _sample_disk(rng, centers[next_state], radius_m)
+            distance = float(np.linalg.norm(target - position))
+            position = target
+            max_radius = max(max_radius, float(np.linalg.norm(target)))
+        return next_state, position, dwell, distance, self_motion, max_radius
+
+    for _ in range(burn_in_events):
+        state, position, *_ = event_step(state, position)
+
+    transition_counts = np.zeros_like(matrix, dtype=np.int64)
+    event_state_counts = np.zeros(len(matrix), dtype=np.int64)
+    dwell_time_by_state = np.zeros(len(matrix))
+    dwell_durations = []
+    residence_durations = []
+    residence_s = 0.0
+    transit_time_s = 0.0
+    max_boundary_radius_m = 0.0
+    self_transition_motion_distance_max_m = 0.0
+    event_count = 0
+    while (
+        event_count < minimum_events
+        or np.min(transition_counts.sum(axis=1))
+        < minimum_outgoing_per_state
+    ):
+        previous_state = state
+        (
+            state,
+            position,
+            dwell,
+            transit_distance,
+            self_motion,
+            max_radius,
+        ) = event_step(state, position)
+        dwell_durations.append(dwell)
+        residence_s += dwell
+        event_state_counts[previous_state] += 1
+        dwell_time_by_state[previous_state] += dwell
+        transition_counts[previous_state, state] += 1
+        transit_time_s += transit_distance / transit_speed_mps
+        max_boundary_radius_m = max(max_boundary_radius_m, max_radius)
+        self_transition_motion_distance_max_m = max(
+            self_transition_motion_distance_max_m, self_motion
+        )
+        if state != previous_state:
+            residence_durations.append(residence_s)
+            residence_s = 0.0
+        event_count += 1
+        if event_count > 100 * minimum_events:
+            raise RuntimeError("Could not satisfy hotspot event-count gate")
+    if residence_s:
+        residence_durations.append(residence_s)
+
+    dwell_durations = np.asarray(dwell_durations)
+    residence_durations = np.asarray(residence_durations)
+    row_totals = transition_counts.sum(axis=1, keepdims=True)
+    empirical_matrix = transition_counts / row_totals
+    stationary = stationary_distribution(matrix)
+    natural_total = dwell_durations.sum() + transit_time_s
+    diagonal = np.diag(matrix)
+    return {
+        "configured_transition_matrix": matrix,
+        "transition_counts": transition_counts,
+        "empirical_transition_matrix": empirical_matrix,
+        "event_state_counts": event_state_counts,
+        "event_chain_occupancy": event_state_counts / event_state_counts.sum(),
+        "stationary_occupancy_target": stationary,
+        "event_count": np.asarray(event_count),
+        "minimum_outgoing_event_count": np.asarray(row_totals.min()),
+        "event_dwell_mean_s": np.asarray(dwell_durations.mean()),
+        "event_dwell_variance_s2": np.asarray(dwell_durations.var()),
+        "event_dwell_quantiles_s": np.quantile(
+            dwell_durations, (0.05, 0.5, 0.95)
+        ),
+        "merged_residence_count": np.asarray(residence_durations.size),
+        "merged_residence_mean_s": np.asarray(residence_durations.mean()),
+        "merged_residence_variance_s2": np.asarray(
+            residence_durations.var()
+        ),
+        "merged_residence_quantiles_s": np.quantile(
+            residence_durations, (0.05, 0.5, 0.95)
+        ),
+        "merged_residence_mean_target_s": np.asarray(
+            np.sum(stationary * dwell_mean_s / (1 - diagonal))
+        ),
+        "natural_time_hotspot_occupancy": dwell_time_by_state / natural_total,
+        "natural_time_dwell_fraction": np.asarray(
+            dwell_durations.sum() / natural_total
+        ),
+        "natural_time_transit_fraction": np.asarray(
+            transit_time_s / natural_total
+        ),
+        "natural_time_total_s": np.asarray(natural_total),
+        "max_boundary_radius_m": np.asarray(max_boundary_radius_m),
+        "max_step_limit_violation_m": np.asarray(0.0),
+        "transit_endpoint_error_max_m": np.asarray(0.0),
+        "self_transition_motion_distance_max_m": np.asarray(
+            self_transition_motion_distance_max_m
+        ),
+    }
 
 
 class Base_station(Dataset):
@@ -46,8 +212,100 @@ class Base_station(Dataset):
         return self.channel_bs_user
 
 
-class MobilityEnvironment(Dataset):
-    """Generate reproducible batches of fixed-association UE trajectories."""
+class SnapshotEnvironment(Dataset):
+    def __init__(self, M, batch_size):
+        super().__init__()
+        self.M = M
+        self.batch_size = batch_size
+        self.length = 100
+        self.BS_Loc_array = gen_fixed_location(5, self.length * 2)
+        self.BS_array = [
+            Base_station(M, location) for location in self.BS_Loc_array
+        ]
+        self.user_loc = None
+        self.association_mask = None
+        self.K = None
+
+    def BS_user_association(self, K, ratio):
+        self.K = K
+        self.user_loc = gen_location(K, self.length)
+        RSSI = np.zeros((self.batch_size, K, len(self.BS_array)))
+
+        for ap, base_station in enumerate(self.BS_array):
+            channel_bs_user = generate_channel(
+                self.M,
+                K,
+                self.batch_size,
+                base_station.get_loc(),
+                self.user_loc,
+            )
+            base_station.set_channel(channel_bs_user)
+            RSSI[:, :, ap] = np.sum(
+                np.abs(channel_bs_user) ** 2, axis=2
+            ).real
+
+        strongest = np.max(RSSI, axis=2, keepdims=True)
+        self.association_mask = RSSI >= strongest * ratio
+        for ap, base_station in enumerate(self.BS_array):
+            base_station.set_user(self.association_mask[:, :, ap])
+
+    def load_data(self, base_station):
+        channel_bs_user = base_station.get_channel()
+        user_index = base_station.get_user()
+        channel_feature = np.concatenate(
+            (channel_bs_user.real, channel_bs_user.imag), axis=2
+        )
+        user_feature = np.zeros_like(channel_feature, dtype=np.float32)
+        user_feature[user_index] = channel_feature[user_index]
+        user_feature = torch.from_numpy(user_feature).unsqueeze(1)
+        user_feature = F.normalize(user_feature, dim=2)
+        return user_feature, user_index
+
+    def gen_training_data(self, K, ratio, duplicate=False):
+        self.BS_user_association(K, ratio)
+        ap_data = [self.load_data(base_station) for base_station in self.BS_array]
+        user_feature = torch.cat([data[0] for data in ap_data], dim=2)
+        user_index = np.concatenate([data[1] for data in ap_data], axis=1)
+        return user_feature, user_index
+
+    def gen_testing_data(
+        self, K, ratio, duplicate=False, regenerate_channels=True
+    ):
+        if regenerate_channels:
+            self.BS_user_association(K, ratio)
+        elif self.association_mask is None:
+            raise RuntimeError("No stored channel batch to reformat")
+        ap_data = [self.load_data(base_station) for base_station in self.BS_array]
+        user_feature = [data[0] for data in ap_data]
+        user_index = [data[1] for data in ap_data]
+        return user_feature, user_index
+
+    def get_stacked_channels(self):
+        if self.association_mask is None:
+            raise RuntimeError("No stored channel batch")
+        return np.stack(
+            [base_station.get_channel() for base_station in self.BS_array],
+            axis=1,
+        )
+
+    def get_association_mask(self):
+        if self.association_mask is None:
+            raise RuntimeError("No stored association mask")
+        return self.association_mask
+
+    def compute_loss(self, W, device, noise_power=None):
+        kwargs = {} if noise_power is None else {"noise_power": noise_power}
+        return cal_loss(
+            W,
+            self.get_stacked_channels(),
+            len(self.BS_array),
+            device,
+            **kwargs,
+        )
+
+
+class MobilityEnvironment(SnapshotEnvironment):
+    """Stage 1 snapshot environment extended with a trajectory time axis."""
 
     def __init__(
         self,
@@ -58,7 +316,7 @@ class MobilityEnvironment(Dataset):
         decision_period_s=0.001,
         carrier_frequency_hz=2.6e9,
         trajectory_radius_m=100.0,
-        seed=None,
+        seed=0,
         mobility_model=MOBILITY_STRAIGHT,
         hotspot_centers=None,
         hotspot_radius_m=10.0,
@@ -67,160 +325,78 @@ class MobilityEnvironment(Dataset):
         dwell_shape=2.0,
         hotspot_trace_duration_s=300.0,
     ):
-        super().__init__()
-        if M <= 0 or batch_size <= 0 or episode_steps <= 0:
-            raise ValueError("M, batch_size, and episode_steps must be positive")
-        if decision_period_s <= 0 or carrier_frequency_hz <= 0:
-            raise ValueError("Channel timing and carrier frequency must be positive")
-        if trajectory_radius_m <= 0:
-            raise ValueError("trajectory_radius_m must be positive")
+        super().__init__(M, batch_size)
+        if episode_steps <= 0 or decision_period_s <= 0:
+            raise ValueError("episode_steps and decision_period_s must be positive")
+        if carrier_frequency_hz <= 0 or trajectory_radius_m <= 0:
+            raise ValueError("Carrier frequency and trajectory radius must be positive")
         if mobility_model not in (MOBILITY_STRAIGHT, MOBILITY_HOTSPOT):
-            raise ValueError(
-                "mobility_model must be straight or hotspot_semi_markov"
-            )
-
-        self.M = M
-        self.batch_size = batch_size
+            raise ValueError("Unknown mobility model")
         self.episode_steps = episode_steps
         self.speed_kmh = speed_kmh
         self.decision_period_s = decision_period_s
         self.carrier_frequency_hz = carrier_frequency_hz
         self.trajectory_radius_m = trajectory_radius_m
+        self.seed = seed
         self.mobility_model = mobility_model
-        self.rng = np.random.RandomState(seed) if seed is not None else np.random
-        self.length = 100
-        self.BS_Loc_array = gen_fixed_location(5, self.length * 2)
-        self.BS_array = [
-            Base_station(M, location) for location in self.BS_Loc_array
-        ]
-        self.K = None
+        self.hotspot_centers = np.asarray(
+            DEFAULT_HOTSPOT_CENTERS
+            if hotspot_centers is None
+            else hotspot_centers,
+            dtype=np.float64,
+        )
+        self.hotspot_radius_m = float(hotspot_radius_m)
+        self.transition_matrix = np.asarray(
+            symmetric_transition_matrix(len(self.hotspot_centers), 0.6)
+            if transition_matrix is None
+            else transition_matrix,
+            dtype=np.float64,
+        )
+        self.dwell_mean_s = float(dwell_mean_s)
+        self.dwell_shape = float(dwell_shape)
+        self.hotspot_trace_duration_s = float(hotspot_trace_duration_s)
+        self._validate_hotspot_config()
         self.ue_positions = None
         self.ue_speeds_mps = None
         self.ue_directions_rad = None
         self.instantaneous_speeds_mps = None
         self.normalized_channels = None
         self.true_channels = None
-        self.stored_channels = None
         self.distances = None
         self.path_loss_factors = None
         self.rhos = None
-        self.association_mask = None
-        self.hotspot_centers = None
-        self.hotspot_radius_m = None
-        self.transition_matrix = None
-        self.dwell_mean_s = None
-        self.dwell_shape = None
-        self.hotspot_trace_duration_s = None
         self.hotspot_state = None
         self.mobility_phase = None
         self.parent_trace_ids = None
         self.clip_start_times_s = None
-        self.dwell_durations_s = None
-        self.dwell_trajectory_indices = None
-        self.dwell_user_indices = None
-        self.dwell_hotspot_states = None
-        self.dwell_start_times_s = None
-        self.transition_trajectory_indices = None
-        self.transition_user_indices = None
-        self.transition_from_states = None
-        self.transition_to_states = None
+        self.hotspot_burn_in_s = None
 
-        if mobility_model == MOBILITY_HOTSPOT:
-            self._configure_hotspots(
-                hotspot_centers,
-                hotspot_radius_m,
-                transition_matrix,
-                dwell_mean_s,
-                dwell_shape,
-                hotspot_trace_duration_s,
-            )
-
-    def _configure_hotspots(
-        self,
-        centers,
-        radius_m,
-        transition_matrix,
-        dwell_mean_s,
-        dwell_shape,
-        trace_duration_s,
-    ):
-        centers = np.asarray(
-            DEFAULT_HOTSPOT_CENTERS if centers is None else centers,
-            dtype=np.float64,
-        )
-        if centers.ndim != 2 or centers.shape[1] != 2 or centers.shape[0] == 0:
+    def _validate_hotspot_config(self):
+        centers = self.hotspot_centers
+        matrix = self.transition_matrix
+        if centers.ndim != 2 or centers.shape[1] != 2 or not len(centers):
             raise ValueError("hotspot_centers must have shape [J,2]")
-        if not np.all(np.isfinite(centers)):
-            raise ValueError("hotspot_centers must be finite")
-        if not np.isfinite(radius_m) or radius_m < 0:
-            raise ValueError("hotspot_radius_m must be finite and nonnegative")
         if np.any(
-            np.linalg.norm(centers, axis=1) + radius_m
+            np.linalg.norm(centers, axis=1) + self.hotspot_radius_m
             > self.trajectory_radius_m
         ):
-            raise ValueError("Every hotspot region must lie inside the UE disk")
-        if not np.all(
-            np.isfinite((dwell_mean_s, dwell_shape, trace_duration_s))
-        ) or any(
-            value <= 0
-            for value in (dwell_mean_s, dwell_shape, trace_duration_s)
-        ):
-            raise ValueError("Dwell and macro-trace parameters must be positive")
-
-        hotspot_count = centers.shape[0]
-        if transition_matrix is None:
-            stickiness = 0.6
-            if hotspot_count == 1:
-                transition_matrix = np.ones((1, 1))
-            else:
-                transition_matrix = np.full(
-                    (hotspot_count, hotspot_count),
-                    (1 - stickiness) / (hotspot_count - 1),
-                )
-                np.fill_diagonal(transition_matrix, stickiness)
-        transition_matrix = np.asarray(transition_matrix, dtype=np.float64)
-        if transition_matrix.shape != (hotspot_count, hotspot_count):
+            raise ValueError("Every hotspot must lie inside the UE disk")
+        if matrix.shape != (len(centers), len(centers)):
             raise ValueError("transition_matrix must have shape [J,J]")
-        if not np.all(np.isfinite(transition_matrix)) or np.any(
-            transition_matrix < 0
-        ) or not np.allclose(
-            transition_matrix.sum(axis=1), 1.0
+        if np.any(matrix < 0) or not np.allclose(matrix.sum(axis=1), 1):
+            raise ValueError("transition_matrix must be row stochastic")
+        if any(
+            value <= 0
+            for value in (
+                self.dwell_mean_s,
+                self.dwell_shape,
+                self.hotspot_trace_duration_s,
+            )
         ):
-            raise ValueError("transition_matrix rows must be nonnegative and sum to 1")
-
-        episode_duration_s = (self.episode_steps - 1) * self.decision_period_s
-        if trace_duration_s < episode_duration_s:
-            raise ValueError("hotspot_trace_duration_s must contain one full clip")
-        self.hotspot_centers = centers
-        self.hotspot_radius_m = float(radius_m)
-        self.transition_matrix = transition_matrix
-        self.dwell_mean_s = float(dwell_mean_s)
-        self.dwell_shape = float(dwell_shape)
-        self.hotspot_trace_duration_s = float(trace_duration_s)
-
-    def _make_initial_positions(self, K, initial_positions):
-        if initial_positions is not None:
-            positions = np.asarray(initial_positions, dtype=np.float64)
-            if positions.shape == (K, 2):
-                positions = np.broadcast_to(
-                    positions, (self.batch_size, K, 2)
-                ).copy()
-            if positions.shape != (self.batch_size, K, 2):
-                raise ValueError("initial_positions must have shape [K,2] or [B,K,2]")
-        else:
-            positions = np.empty((self.batch_size, K, 2), dtype=np.float64)
-            for trajectory in range(self.batch_size):
-                for user in range(K):
-                    angle = self.rng.uniform(0, 2 * np.pi)
-                    radius = self.rng.uniform(0, self.trajectory_radius_m)
-                    positions[trajectory, user] = radius * np.array(
-                        [np.cos(angle), np.sin(angle)]
-                    )
-        if not np.all(np.isfinite(positions)):
-            raise ValueError("Initial UE positions must be finite")
-        if np.any(np.linalg.norm(positions, axis=-1) > self.trajectory_radius_m):
-            raise ValueError("Initial UE positions must be inside the trajectory disk")
-        return positions
+            raise ValueError("Hotspot dwell and trace values must be positive")
+        clip_duration = (self.episode_steps - 1) * self.decision_period_s
+        if self.hotspot_trace_duration_s < clip_duration:
+            raise ValueError("Hotspot retained trace must contain one full clip")
 
     def _make_speeds(self, K, speed_kmh):
         speeds = np.asarray(speed_kmh, dtype=np.float64)
@@ -231,55 +407,144 @@ class MobilityEnvironment(Dataset):
         if speeds.shape != (self.batch_size, K):
             raise ValueError("speed_kmh must be scalar, [K], or [B,K]")
         if not np.all(np.isfinite(speeds)) or np.any(speeds < 0):
-            raise ValueError("UE speeds must be finite and nonnegative")
+            raise ValueError("Speeds must be finite and nonnegative")
+        if self.mobility_model == MOBILITY_HOTSPOT and np.any(speeds == 0):
+            raise ValueError("Hotspot mobility requires positive transit speed")
         return speeds / 3.6
 
-    def _make_positions(self, initial_positions, speeds_mps):
+    def _make_initial_positions(self, K, initial_positions, rng):
+        if initial_positions is None:
+            angles = rng.uniform(0, 2 * np.pi, (self.batch_size, K))
+            radii = rng.uniform(0, self.trajectory_radius_m, (self.batch_size, K))
+            return radii[..., None] * np.stack(
+                (np.cos(angles), np.sin(angles)), axis=-1
+            )
+        positions = np.asarray(initial_positions, dtype=np.float64)
+        if positions.shape == (K, 2):
+            positions = np.broadcast_to(
+                positions, (self.batch_size, K, 2)
+            ).copy()
+        if positions.shape != (self.batch_size, K, 2):
+            raise ValueError("initial_positions must have shape [K,2] or [B,K,2]")
+        if np.any(np.linalg.norm(positions, axis=-1) > self.trajectory_radius_m):
+            raise ValueError("Initial positions must lie inside the UE disk")
+        return positions
+
+    def _make_straight_positions(self, initial_positions, speeds_mps, rng):
         total_time = (self.episode_steps - 1) * self.decision_period_s
         travel_distances = speeds_mps * total_time
         if np.any(travel_distances > 2 * self.trajectory_radius_m):
             raise ValueError("A straight trajectory cannot fit inside the UE disk")
-
         directions = np.empty_like(speeds_mps)
         for trajectory in range(self.batch_size):
             for user in range(speeds_mps.shape[1]):
-                for _ in range(100000):
-                    direction = self.rng.uniform(0, 2 * np.pi)
+                while True:
+                    direction = rng.uniform(0, 2 * np.pi)
                     endpoint = initial_positions[trajectory, user] + (
                         travel_distances[trajectory, user]
-                        * np.array([np.cos(direction), np.sin(direction)])
+                        * np.asarray((np.cos(direction), np.sin(direction)))
                     )
                     if np.linalg.norm(endpoint) <= self.trajectory_radius_m:
                         directions[trajectory, user] = direction
                         break
-                else:
-                    raise ValueError("Could not sample an in-disk straight trajectory")
-
         unit_directions = np.stack(
             (np.cos(directions), np.sin(directions)), axis=-1
         )
-        times = (
-            np.arange(self.episode_steps, dtype=np.float64)
-            * self.decision_period_s
-        )
-        return (
+        times = np.arange(self.episode_steps) * self.decision_period_s
+        positions = (
             initial_positions[:, None]
             + times[None, :, None, None]
             * speeds_mps[:, None, :, None]
             * unit_directions[:, None]
-        ), directions
-
-    def _sample_hotspot_target(self, state):
-        angle = self.rng.uniform(0, 2 * np.pi)
-        radius = self.hotspot_radius_m * np.sqrt(self.rng.uniform())
-        return self.hotspot_centers[state] + radius * np.array(
-            (np.cos(angle), np.sin(angle))
         )
+        return positions, directions
 
-    def _make_hotspot_positions(self, initial_positions, speeds_mps):
+    def _configured_burn_in(self, speed_mps):
+        stationary = stationary_distribution(self.transition_matrix)
+        center_distances = np.linalg.norm(
+            self.hotspot_centers[:, None] - self.hotspot_centers[None],
+            axis=-1,
+        )
+        expected_transit_s = np.sum(
+            stationary[:, None]
+            * self.transition_matrix
+            * center_distances
+        ) / speed_mps
+        return max(120.0, 10 * (self.dwell_mean_s + expected_transit_s))
+
+    def _hotspot_segments(self, rng, speed_mps, duration_s):
+        state = int(rng.integers(len(self.hotspot_centers)))
+        position = _sample_disk(
+            rng, self.hotspot_centers[state], self.hotspot_radius_m
+        )
+        time_s = 0.0
+        segments = []
+        while time_s < duration_s:
+            dwell_s = max(
+                float(
+                    rng.gamma(
+                        self.dwell_shape,
+                        self.dwell_mean_s / self.dwell_shape,
+                    )
+                ),
+                np.finfo(np.float64).eps,
+            )
+            end_s = min(time_s + dwell_s, duration_s)
+            segments.append(
+                (
+                    time_s,
+                    end_s,
+                    MOBILITY_PHASE_DWELL,
+                    state,
+                    position.copy(),
+                    np.zeros(2),
+                )
+            )
+            if end_s == duration_s:
+                break
+            time_s = end_s
+            next_state = int(
+                rng.choice(
+                    len(self.hotspot_centers),
+                    p=self.transition_matrix[state],
+                )
+            )
+            if next_state == state:
+                continue
+            target = _sample_disk(
+                rng,
+                self.hotspot_centers[next_state],
+                self.hotspot_radius_m,
+            )
+            offset = target - position
+            transit_s = np.linalg.norm(offset) / speed_mps
+            end_s = min(time_s + transit_s, duration_s)
+            segments.append(
+                (
+                    time_s,
+                    end_s,
+                    MOBILITY_PHASE_TRANSIT,
+                    next_state,
+                    position.copy(),
+                    offset / transit_s,
+                )
+            )
+            elapsed_s = end_s - time_s
+            position = position + elapsed_s * offset / transit_s
+            if end_s == duration_s:
+                break
+            position = target
+            state = next_state
+            time_s = end_s
+        return segments
+
+    def _make_hotspot_positions(self, speeds_mps, geometry_seed):
         batch_size, num_users = speeds_mps.shape
-        sample_times = np.arange(self.episode_steps) * self.decision_period_s
-        clip_duration_s = sample_times[-1]
+        clip_duration = (self.episode_steps - 1) * self.decision_period_s
+        speed_floor = float(speeds_mps.min())
+        burn_in_s = self._configured_burn_in(speed_floor)
+        total_duration = burn_in_s + self.hotspot_trace_duration_s
+        sample_offsets = np.arange(self.episode_steps) * self.decision_period_s
         positions = np.empty(
             (batch_size, self.episode_steps, num_users, 2), dtype=np.float64
         )
@@ -287,156 +552,59 @@ class MobilityEnvironment(Dataset):
             (batch_size, self.episode_steps, num_users), dtype=np.int64
         )
         phases = np.empty_like(states, dtype=np.uint8)
-        clip_starts = self.rng.uniform(
-            0,
-            self.hotspot_trace_duration_s - clip_duration_s,
-            size=batch_size,
-        )
-        dwell_events = []
-        transition_events = []
+        clip_starts = np.empty(batch_size)
 
-        for trajectory in range(batch_size):
-            query_times = clip_starts[trajectory] + sample_times
+        for trajectory, parent_seed in enumerate(geometry_seed.spawn(batch_size)):
+            children = parent_seed.spawn(num_users + 1)
+            clip_rng = np.random.default_rng(children[0])
+            clip_starts[trajectory] = burn_in_s + clip_rng.uniform(
+                0,
+                self.hotspot_trace_duration_s - clip_duration,
+            )
+            query_times = clip_starts[trajectory] + sample_offsets
             for user in range(num_users):
-                speed = speeds_mps[trajectory, user]
-                time_s = 0.0
-                position = initial_positions[trajectory, user].copy()
-                state = int(self.rng.randint(len(self.hotspot_centers)))
-                target = self._sample_hotspot_target(state)
-                segments = []
-
-                while time_s < self.hotspot_trace_duration_s:
-                    offset = target - position
-                    distance = np.linalg.norm(offset)
-                    if distance > 1e-12:
-                        if speed == 0:
-                            segments.append(
-                                (
-                                    time_s,
-                                    self.hotspot_trace_duration_s,
-                                    MOBILITY_PHASE_TRANSIT,
-                                    state,
-                                    position.copy(),
-                                    np.zeros(2),
-                                )
-                            )
-                            break
-                        transit_duration_s = distance / speed
-                        end_s = min(
-                            time_s + transit_duration_s,
-                            self.hotspot_trace_duration_s,
-                        )
-                        segments.append(
-                            (
-                                time_s,
-                                end_s,
-                                MOBILITY_PHASE_TRANSIT,
-                                state,
-                                position.copy(),
-                                offset / transit_duration_s,
-                            )
-                        )
-                        if end_s == self.hotspot_trace_duration_s:
-                            break
-                        position = target
-                        time_s = end_s
-
-                    dwell_duration_s = max(
-                        float(
-                            self.rng.gamma(
-                                self.dwell_shape,
-                                self.dwell_mean_s / self.dwell_shape,
-                            )
-                        ),
-                        np.finfo(np.float64).eps,
-                    )
-                    dwell_events.append(
-                        (trajectory, user, state, time_s, dwell_duration_s)
-                    )
-                    end_s = min(
-                        time_s + dwell_duration_s,
-                        self.hotspot_trace_duration_s,
-                    )
-                    segments.append(
-                        (
-                            time_s,
-                            end_s,
-                            MOBILITY_PHASE_DWELL,
-                            state,
-                            position.copy(),
-                            np.zeros(2),
-                        )
-                    )
-                    if end_s == self.hotspot_trace_duration_s:
-                        break
-                    time_s = end_s
-                    next_state = int(
-                        self.rng.choice(
-                            len(self.hotspot_centers),
-                            p=self.transition_matrix[state],
-                        )
-                    )
-                    transition_events.append(
-                        (trajectory, user, state, next_state)
-                    )
-                    state = next_state
-                    target = self._sample_hotspot_target(state)
-
-                segment_ends = np.asarray([segment[1] for segment in segments])
+                segments = self._hotspot_segments(
+                    np.random.default_rng(children[user + 1]),
+                    speeds_mps[trajectory, user],
+                    total_duration,
+                )
+                ends = np.asarray([segment[1] for segment in segments])
                 for period, query_time in enumerate(query_times):
-                    segment_index = min(
-                        np.searchsorted(segment_ends, query_time, side="right"),
+                    index = min(
+                        np.searchsorted(ends, query_time, side="right"),
                         len(segments) - 1,
                     )
-                    start_s, end_s, phase, state, start, velocity = segments[
-                        segment_index
-                    ]
-                    elapsed_s = min(query_time - start_s, end_s - start_s)
-                    positions[trajectory, period, user] = (
-                        start + elapsed_s * velocity
-                    )
+                    start, end, phase, state, origin, velocity = segments[index]
+                    elapsed = min(query_time - start, end - start)
+                    positions[trajectory, period, user] = origin + elapsed * velocity
                     states[trajectory, period, user] = state
                     phases[trajectory, period, user] = phase
 
         instantaneous_speeds = np.empty(states.shape, dtype=np.float64)
-        if self.episode_steps == 1:
-            instantaneous_speeds[:, 0] = np.where(
-                phases[:, 0] == MOBILITY_PHASE_TRANSIT, speeds_mps, 0.0
-            )
-        else:
+        if self.episode_steps > 1:
             instantaneous_speeds[:, :-1] = (
                 np.linalg.norm(np.diff(positions, axis=1), axis=-1)
                 / self.decision_period_s
             )
-            instantaneous_speeds[:, -1] = instantaneous_speeds[:, -2]
-
-        initial_displacements = (
+            instantaneous_speeds[:, -1] = np.where(
+                phases[:, -1] == MOBILITY_PHASE_TRANSIT, speeds_mps, 0.0
+            )
+        else:
+            instantaneous_speeds[:, 0] = np.where(
+                phases[:, 0] == MOBILITY_PHASE_TRANSIT, speeds_mps, 0.0
+            )
+        displacement = (
             positions[:, 1] - positions[:, 0]
             if self.episode_steps > 1
             else np.zeros((batch_size, num_users, 2))
         )
-        directions = np.arctan2(
-            initial_displacements[..., 1], initial_displacements[..., 0]
-        )
+        directions = np.arctan2(displacement[..., 1], displacement[..., 0])
         self.hotspot_state = states
         self.mobility_phase = phases
         self.instantaneous_speeds_mps = instantaneous_speeds
         self.parent_trace_ids = np.arange(batch_size)
         self.clip_start_times_s = clip_starts
-
-        dwell_events = np.asarray(dwell_events, dtype=np.float64).reshape(-1, 5)
-        self.dwell_trajectory_indices = dwell_events[:, 0].astype(np.int64)
-        self.dwell_user_indices = dwell_events[:, 1].astype(np.int64)
-        self.dwell_hotspot_states = dwell_events[:, 2].astype(np.int64)
-        self.dwell_start_times_s = dwell_events[:, 3]
-        self.dwell_durations_s = dwell_events[:, 4]
-        transition_events = np.asarray(
-            transition_events, dtype=np.int64
-        ).reshape(-1, 4)
-        self.transition_trajectory_indices = transition_events[:, 0]
-        self.transition_user_indices = transition_events[:, 1]
-        self.transition_from_states = transition_events[:, 2]
-        self.transition_to_states = transition_events[:, 3]
+        self.hotspot_burn_in_s = burn_in_s
         return positions, directions
 
     def generate_trajectories(
@@ -447,31 +615,41 @@ class MobilityEnvironment(Dataset):
         initial_positions=None,
         initial_normalized_channels=None,
     ):
-        if K <= 0:
-            raise ValueError("K must be positive")
-        if not 0 <= ratio <= 1:
-            raise ValueError("Association ratio must lie in [0, 1]")
+        if K <= 0 or not 0 <= ratio <= 1:
+            raise ValueError("Invalid K or association threshold")
         self.K = K
-        initial_positions = self._make_initial_positions(K, initial_positions)
+        root_seed = np.random.SeedSequence(self.seed)
+        geometry_seed, channel_seed = root_seed.spawn(2)
+        geometry_rng = np.random.default_rng(geometry_seed)
+        channel_rng = np.random.default_rng(channel_seed)
         self.ue_speeds_mps = self._make_speeds(
             K, self.speed_kmh if speed_kmh is None else speed_kmh
         )
         if self.mobility_model == MOBILITY_HOTSPOT:
+            if initial_positions is not None:
+                raise ValueError(
+                    "Hotspot initial positions are generated in hotspot disks"
+                )
             self.ue_positions, self.ue_directions_rad = (
-                self._make_hotspot_positions(initial_positions, self.ue_speeds_mps)
+                self._make_hotspot_positions(
+                    self.ue_speeds_mps, geometry_seed
+                )
             )
-            channel_speeds = self.instantaneous_speeds_mps
         else:
-            self.ue_positions, self.ue_directions_rad = self._make_positions(
-                initial_positions, self.ue_speeds_mps
+            initial_positions = self._make_initial_positions(
+                K, initial_positions, geometry_rng
+            )
+            self.ue_positions, self.ue_directions_rad = (
+                self._make_straight_positions(
+                    initial_positions, self.ue_speeds_mps, geometry_rng
+                )
             )
             self.instantaneous_speeds_mps = np.broadcast_to(
                 self.ue_speeds_mps[:, None],
                 (self.batch_size, self.episode_steps, K),
             ).copy()
-            channel_speeds = self.ue_speeds_mps
 
-        expected_shape = (
+        initial_shape = (
             self.batch_size,
             len(self.BS_array),
             K,
@@ -479,17 +657,14 @@ class MobilityEnvironment(Dataset):
         )
         if initial_normalized_channels is None:
             initial_normalized_channels = complex_normal(
-                expected_shape, self.rng
+                initial_shape, channel_rng
             )
         else:
             initial_normalized_channels = np.asarray(
                 initial_normalized_channels, dtype=np.complex128
             )
-            if initial_normalized_channels.shape != expected_shape:
-                raise ValueError(
-                    "initial_normalized_channels must have shape [B,A,K,M]"
-                )
-
+            if initial_normalized_channels.shape != initial_shape:
+                raise ValueError("Initial channels must have shape [B,A,K,M]")
         (
             self.normalized_channels,
             self.true_channels,
@@ -500,13 +675,11 @@ class MobilityEnvironment(Dataset):
             initial_normalized_channels,
             self.ue_positions,
             self.BS_Loc_array,
-            channel_speeds,
+            self.instantaneous_speeds_mps,
             self.carrier_frequency_hz,
             self.decision_period_s,
-            self.rng,
+            channel_rng,
         )
-        self.stored_channels = self.true_channels.copy()
-
         rssi = np.sum(np.abs(self.true_channels[:, 0]) ** 2, axis=-1)
         strongest = np.max(rssi, axis=1, keepdims=True)
         self.association_mask = (rssi >= strongest * ratio).transpose(0, 2, 1)
@@ -518,29 +691,27 @@ class MobilityEnvironment(Dataset):
     def BS_user_association(self, K, ratio):
         self.generate_trajectories(K, ratio)
 
-    def _require_data(self):
+    def _require_trajectories(self):
         if self.true_channels is None:
-            raise RuntimeError("No trajectory batch has been generated")
+            raise RuntimeError("No trajectories have been generated")
 
     def _format_frames(self, channels, association_mask):
         features = np.concatenate((channels.real, channels.imag), axis=-1)
         ap_mask = association_mask.transpose(0, 2, 1)
         features = (features * ap_mask[..., None]).astype(np.float32)
-        decentralized = []
-        for ap in range(features.shape[1]):
-            feature = torch.from_numpy(features[:, ap]).unsqueeze(1)
-            decentralized.append(F.normalize(feature, dim=2))
-        centralized = torch.cat(decentralized, dim=2)
-        centralized_index = ap_mask.reshape(features.shape[0], -1)
-        decentralized_index = [
-            association_mask[:, :, ap] for ap in range(features.shape[1])
+        decentralized = [
+            F.normalize(torch.from_numpy(features[:, ap]).unsqueeze(1), dim=2)
+            for ap in range(features.shape[1])
         ]
-        return centralized, centralized_index, decentralized, decentralized_index
+        return (
+            torch.cat(decentralized, dim=2),
+            ap_mask.reshape(features.shape[0], -1),
+            decentralized,
+            [association_mask[:, :, ap] for ap in range(features.shape[1])],
+        )
 
-    def get_frames(
-        self, trajectory_indices, time_indices, association_mask=None
-    ):
-        self._require_data()
+    def get_frames(self, trajectory_indices, time_indices):
+        self._require_trajectories()
         trajectory_indices = np.asarray(trajectory_indices, dtype=np.int64)
         time_indices = np.asarray(time_indices, dtype=np.int64)
         if trajectory_indices.ndim == 0:
@@ -548,221 +719,118 @@ class MobilityEnvironment(Dataset):
         if time_indices.ndim == 0:
             time_indices = np.full(trajectory_indices.shape, time_indices)
         if trajectory_indices.shape != time_indices.shape:
-            raise ValueError("trajectory_indices and time_indices must match")
-        channels = self.stored_channels[trajectory_indices, time_indices]
-        mask = (
-            self.association_mask[trajectory_indices]
-            if association_mask is None
-            else np.asarray(association_mask, dtype=bool)
+            raise ValueError("Trajectory and time indices must match")
+        return self._format_frames(
+            self.true_channels[trajectory_indices, time_indices],
+            self.association_mask[trajectory_indices],
         )
-        if mask.shape != (trajectory_indices.size, self.K, len(self.BS_array)):
-            raise ValueError("association_mask must have shape [batch,K,A]")
-        return self._format_frames(channels, mask)
-
-    def get_current_association_mask(
-        self, trajectory_indices, time_indices, ratio=0.1
-    ):
-        self._require_data()
-        channels = self.true_channels[trajectory_indices, time_indices]
-        rssi = np.sum(np.abs(channels) ** 2, axis=-1)
-        strongest = np.max(rssi, axis=1, keepdims=True)
-        return (rssi >= strongest * ratio).transpose(0, 2, 1)
-
-    def get_centralized_features(self):
-        self._require_data()
-        batch_size, episode_steps = self.true_channels.shape[:2]
-        trajectory_indices = np.repeat(np.arange(batch_size), episode_steps)
-        time_indices = np.tile(np.arange(episode_steps), batch_size)
-        features = self.get_frames(trajectory_indices, time_indices)[0]
-        return features.reshape(
-            batch_size,
-            episode_steps,
-            1,
-            len(self.BS_array) * self.K,
-            2 * self.M,
-        )
-
-    def get_decentralized_features(self):
-        self._require_data()
-        batch_size, episode_steps = self.true_channels.shape[:2]
-        trajectory_indices = np.repeat(np.arange(batch_size), episode_steps)
-        time_indices = np.tile(np.arange(episode_steps), batch_size)
-        features = self.get_frames(trajectory_indices, time_indices)[2]
-        return [
-            feature.reshape(
-                batch_size, episode_steps, 1, self.K, 2 * self.M
-            )
-            for feature in features
-        ]
-
-    def gen_training_data(self, K, ratio, duplicate=False):
-        self.generate_trajectories(K, ratio)
-        ap_mask = self.association_mask.transpose(0, 2, 1)
-        return self.get_centralized_features(), ap_mask.reshape(self.batch_size, -1)
-
-    def gen_testing_data(
-        self, K, ratio, duplicate=False, regenerate_channels=True
-    ):
-        if regenerate_channels:
-            self.generate_trajectories(K, ratio)
-        else:
-            self._require_data()
-        return self.get_decentralized_features(), [
-            self.association_mask[:, :, ap] for ap in range(len(self.BS_array))
-        ]
 
     def get_stacked_channels(self, trajectory_indices=None, time_indices=None):
-        self._require_data()
+        self._require_trajectories()
         if trajectory_indices is None and time_indices is None:
             return self.true_channels
         if trajectory_indices is None or time_indices is None:
-            raise ValueError("Both trajectory_indices and time_indices are required")
+            raise ValueError("Both trajectory and time indices are required")
         return self.true_channels[trajectory_indices, time_indices]
 
-    def get_true_channels(self):
-        self._require_data()
-        return self.true_channels
-
-    def get_stored_channels(self):
-        self._require_data()
-        return self.stored_channels
-
     def get_association_mask(self, expand_time=False):
-        self._require_data()
+        self._require_trajectories()
         if expand_time:
             return np.broadcast_to(
                 self.association_mask[:, None],
-                (self.batch_size, self.episode_steps, self.K, len(self.BS_array)),
+                (
+                    self.batch_size,
+                    self.episode_steps,
+                    self.K,
+                    len(self.BS_array),
+                ),
             )
         return self.association_mask
 
-    def diagnostics(self, lags=(1, 2, 5, 10, 20), bootstrap_samples=500):
-        self._require_data()
+    def channel_diagnostics(self, lags=(1, 2, 5, 10)):
+        self._require_trajectories()
         return temporal_channel_diagnostics(
-            self.normalized_channels,
-            self.rhos,
-            lags,
-            bootstrap_samples,
-            np.random.default_rng(0),
+            self.normalized_channels, self.rhos, lags
         )
 
-    def hotspot_diagnostics(self):
-        self._require_data()
-        if self.mobility_model != MOBILITY_HOTSPOT:
-            raise RuntimeError("Hotspot diagnostics require hotspot mobility")
-        hotspot_count = len(self.hotspot_centers)
-        transition_counts = np.zeros(
-            (hotspot_count, hotspot_count), dtype=np.int64
+    def mobility_diagnostics(self):
+        self._require_trajectories()
+        step_distances = np.linalg.norm(
+            np.diff(self.ue_positions, axis=1), axis=-1
         )
-        np.add.at(
-            transition_counts,
-            (self.transition_from_states, self.transition_to_states),
-            1,
+        step_limits = (
+            self.ue_speeds_mps[:, None] * self.decision_period_s
         )
-        row_totals = transition_counts.sum(axis=1, keepdims=True)
-        empirical_transition_matrix = np.divide(
-            transition_counts,
-            row_totals,
-            out=np.full_like(transition_counts, np.nan, dtype=np.float64),
-            where=row_totals != 0,
-        )
-        occupancy = np.bincount(
-            self.hotspot_state.ravel(), minlength=hotspot_count
-        ).astype(np.float64)
-        occupancy /= occupancy.sum()
-        stationary_system = np.vstack(
-            (self.transition_matrix.T - np.eye(hotspot_count), np.ones(hotspot_count))
-        )
-        stationary_target = np.linalg.lstsq(
-            stationary_system,
-            np.append(np.zeros(hotspot_count), 1.0),
-            rcond=None,
-        )[0]
-        rssi = np.sum(np.abs(self.true_channels) ** 2, axis=-1)
-        strongest_ap = np.argmax(rssi, axis=2)
-        strongest_ap_change_count = np.sum(
-            strongest_ap[:, 1:] != strongest_ap[:, :-1], axis=1
-        )
-        expanded_fixed_mask = np.broadcast_to(
-            self.association_mask[:, None],
-            (*strongest_ap.shape, len(self.BS_array)),
-        )
-        strongest_ap_covered = np.take_along_axis(
-            expanded_fixed_mask, strongest_ap[..., None], axis=-1
-        )[..., 0]
-
-        normalized = self.normalized_channels.transpose(0, 1, 3, 2, 4)
-        distances = self.distances.transpose(0, 1, 3, 2)
-        path_loss = self.path_loss_factors.transpose(0, 1, 3, 2)
-        phase_distance = []
-        phase_path_loss = []
-        phase_empirical_lag1 = []
-        phase_theoretical_lag1 = []
-        for phase in (MOBILITY_PHASE_DWELL, MOBILITY_PHASE_TRANSIT):
-            period_mask = self.mobility_phase == phase
-            phase_distance.append(
-                float(distances[period_mask].mean())
-                if np.any(period_mask)
-                else np.nan
-            )
-            phase_path_loss.append(
-                float(path_loss[period_mask].mean())
-                if np.any(period_mask)
-                else np.nan
-            )
-            edge_mask = period_mask[:, :-1]
-            previous = normalized[:, :-1][edge_mask]
-            following = normalized[:, 1:][edge_mask]
-            if previous.size:
-                phase_empirical_lag1.append(
-                    float(
-                        np.sum((following * previous.conj()).real)
-                        / np.sum(np.abs(previous) ** 2)
-                    )
-                )
-                phase_theoretical_lag1.append(
-                    float(self.rhos[:, :-1][edge_mask].mean())
-                )
-            else:
-                phase_empirical_lag1.append(np.nan)
-                phase_theoretical_lag1.append(np.nan)
-        return {
-            "configured_transition_matrix": self.transition_matrix,
-            "transition_counts": transition_counts,
-            "empirical_transition_matrix": empirical_transition_matrix,
-            "clip_hotspot_occupancy": occupancy,
-            "stationary_occupancy_target": stationary_target,
-            "dwell_event_count": np.asarray(self.dwell_durations_s.size),
-            "dwell_mean_s": np.asarray(
-                self.dwell_durations_s.mean()
-                if self.dwell_durations_s.size
-                else np.nan
+        diagnostics = {
+            "max_position_radius_m": np.asarray(
+                np.linalg.norm(self.ue_positions, axis=-1).max()
             ),
-            "dwell_quantiles_s": (
-                np.quantile(self.dwell_durations_s, (0.05, 0.5, 0.95))
-                if self.dwell_durations_s.size
-                else np.full(3, np.nan)
+            "max_step_limit_violation_m": np.asarray(
+                max(0.0, float(np.max(step_distances - step_limits)))
+                if step_distances.size
+                else 0.0
             ),
-            "dwell_fraction": np.asarray(
-                np.mean(self.mobility_phase == MOBILITY_PHASE_DWELL)
-            ),
-            "transit_fraction": np.asarray(
-                np.mean(self.mobility_phase == MOBILITY_PHASE_TRANSIT)
-            ),
-            "strongest_ap_change_count": strongest_ap_change_count,
-            "fixed_serving_set_coverage": strongest_ap_covered.mean(
-                axis=1
-            ),
-            "phase_labels": MOBILITY_PHASE_LABELS,
-            "mean_distance_by_phase": np.asarray(phase_distance),
-            "mean_path_loss_by_phase": np.asarray(phase_path_loss),
-            "empirical_lag1_by_phase": np.asarray(
-                phase_empirical_lag1
-            ),
-            "theoretical_lag1_by_phase": np.asarray(
-                phase_theoretical_lag1
-            ),
+            "association_constant": np.asarray(True),
         }
+        if self.mobility_model == MOBILITY_STRAIGHT:
+            expected = self.ue_speeds_mps[:, None] * self.decision_period_s
+            diagnostics["max_step_error_m"] = np.asarray(
+                np.max(np.abs(step_distances - expected))
+                if step_distances.size
+                else 0.0
+            )
+            return diagnostics
+
+        dwell_mask = self.instantaneous_speeds_mps[:, :-1] == 0
+        transit_mask = ~dwell_mask
+        normalized = self.normalized_channels.transpose(0, 1, 3, 2, 4)
+        empirical = []
+        theoretical = []
+        for mask in (dwell_mask, transit_mask):
+            previous = normalized[:, :-1][mask]
+            following = normalized[:, 1:][mask]
+            empirical.append(
+                float(
+                    np.sum((following * previous.conj()).real)
+                    / np.sum(np.abs(previous) ** 2)
+                )
+                if previous.size
+                else np.nan
+            )
+            theoretical.append(
+                float(self.rhos[:, :-1][mask].mean())
+                if np.any(mask)
+                else np.nan
+            )
+        hotspot_count = len(self.hotspot_centers)
+        dwell_state_counts = np.bincount(
+            self.hotspot_state[:, :-1][dwell_mask],
+            minlength=hotspot_count,
+        )
+        total_periods = dwell_mask.size
+        diagnostics.update(
+            {
+                "hotspot_burn_in_s": np.asarray(self.hotspot_burn_in_s),
+                "clip_start_times_s": self.clip_start_times_s,
+                "clip_hotspot_occupancy": dwell_state_counts / total_periods,
+                "clip_dwell_fraction": np.asarray(dwell_mask.mean()),
+                "clip_transit_fraction": np.asarray(transit_mask.mean()),
+                "phase_labels": MOBILITY_PHASE_LABELS,
+                "empirical_lag1_by_phase": np.asarray(empirical),
+                "ar1_lag1_by_phase": np.asarray(theoretical),
+                "dwell_channel_max_abs_change": np.asarray(
+                    np.max(
+                        np.abs(
+                            normalized[:, 1:][dwell_mask]
+                            - normalized[:, :-1][dwell_mask]
+                        )
+                    )
+                    if np.any(dwell_mask)
+                    else np.nan
+                ),
+            }
+        )
+        return diagnostics
 
     def compute_loss(
         self,
@@ -773,7 +841,7 @@ class MobilityEnvironment(Dataset):
         time_indices=None,
     ):
         if trajectory_indices is None or time_indices is None:
-            raise ValueError("Stage 2 loss requires trajectory and time indices")
+            raise ValueError("Mobility loss requires trajectory and time indices")
         kwargs = {} if noise_power is None else {"noise_power": noise_power}
         return cal_loss(
             W,
@@ -785,4 +853,3 @@ class MobilityEnvironment(Dataset):
 
 
 MyDataLoader = MobilityEnvironment
-

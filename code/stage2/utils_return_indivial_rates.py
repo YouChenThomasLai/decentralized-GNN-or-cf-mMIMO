@@ -150,29 +150,26 @@ def jakes_correlation(
     carrier_frequency_hz=2.6e9,
     decision_period_s=0.001,
 ):
-    """Return the one-period Jakes coefficient for one or more UE speeds."""
+    """Return the Jakes-calibrated one-step AR(1) coefficient."""
     speed_mps = np.asarray(speed_mps, dtype=np.float64)
     doppler_hz = carrier_frequency_hz * speed_mps / SPEED_OF_LIGHT_MPS
-    arguments = 2 * np.pi * doppler_hz * decision_period_s
+    argument = 2 * np.pi * doppler_hz * decision_period_s
     values = torch.special.bessel_j0(
-        torch.as_tensor(arguments, dtype=torch.float64)
+        torch.as_tensor(argument, dtype=torch.float64)
     ).cpu().numpy()
     return float(values) if values.ndim == 0 else values
 
 
-def complex_normal(shape, rng=np.random):
+def complex_normal(shape, rng):
     return (
         rng.standard_normal(shape) + 1j * rng.standard_normal(shape)
     ) / np.sqrt(2)
 
 
 def distance_and_path_loss(ue_positions, bs_locations):
-    """Return distances and Stage 1 amplitude factors over a trajectory."""
-    ue_positions = np.asarray(ue_positions, dtype=np.float64)
-    bs_locations = np.asarray(bs_locations, dtype=np.float64)
     offsets = (
-        bs_locations[None, None, :, None, :]
-        - ue_positions[:, :, None, :, :]
+        np.asarray(bs_locations)[None, None, :, None, :]
+        - np.asarray(ue_positions)[:, :, None, :, :]
     )
     distances = np.linalg.norm(offsets, axis=-1)
     if np.any(distances == 0):
@@ -192,125 +189,146 @@ def generate_temporal_channels(
     ue_speeds_mps,
     carrier_frequency_hz=2.6e9,
     decision_period_s=0.001,
-    rng=np.random,
+    rng=None,
 ):
-    """Generate first-order Gauss-Markov small-scale fading."""
+    """Generate the plan's stationary first-order Gauss-Markov channel."""
+    rng = np.random.default_rng() if rng is None else rng
     initial = np.asarray(initial_normalized_channels, dtype=np.complex128)
     positions = np.asarray(ue_positions, dtype=np.float64)
     speeds = np.asarray(ue_speeds_mps, dtype=np.float64)
     batch_size, episode_steps, num_users = positions.shape[:3]
     if initial.shape[0] != batch_size or initial.shape[2] != num_users:
         raise ValueError("Initial channels do not match trajectory dimensions")
-    valid_speed_shapes = (
-        (batch_size, num_users),
-        (batch_size, episode_steps, num_users),
-    )
-    if speeds.shape not in valid_speed_shapes:
+    if speeds.shape == (batch_size, num_users):
+        speeds = np.broadcast_to(
+            speeds[:, None], (batch_size, episode_steps, num_users)
+        )
+    if speeds.shape != (batch_size, episode_steps, num_users):
         raise ValueError("ue_speeds_mps must have shape [B,K] or [B,T,K]")
 
     rhos = jakes_correlation(
         speeds, carrier_frequency_hz, decision_period_s
     )
-    if np.any(np.abs(rhos) > 1):
-        raise ValueError("Jakes coefficients must lie in [-1, 1]")
-
     normalized = np.empty(
         (batch_size, episode_steps, *initial.shape[1:]),
         dtype=np.complex128,
     )
     normalized[:, 0] = initial
     for period in range(1, episode_steps):
-        period_rhos = rhos if rhos.ndim == 2 else rhos[:, period - 1]
-        rho = period_rhos[:, None, :, None]
-        innovation_scale = np.sqrt(np.maximum(0.0, 1 - rho**2))
+        rho = rhos[:, period - 1, None, :, None]
         innovation = complex_normal(initial.shape, rng)
         normalized[:, period] = (
             rho * normalized[:, period - 1]
-            + innovation_scale * innovation
+            + np.sqrt(np.maximum(0.0, 1 - rho**2)) * innovation
         )
 
     distances, path_loss = distance_and_path_loss(positions, bs_locations)
-    channels = normalized * path_loss[..., None]
-    return normalized, channels, distances, path_loss, rhos
+    return (
+        normalized,
+        normalized * path_loss[..., None],
+        distances,
+        path_loss,
+        rhos,
+    )
 
 
-def temporal_channel_diagnostics(
-    normalized_channels,
-    rhos,
-    lags=(1, 2, 5, 10, 20),
-    bootstrap_samples=500,
-    rng=None,
-):
-    """Estimate normalized-channel autocorrelation and bootstrap intervals."""
+def temporal_channel_diagnostics(normalized_channels, rhos, lags=(1, 2, 5, 10)):
     normalized = np.asarray(normalized_channels)
     rhos = np.asarray(rhos, dtype=np.float64)
-    if normalized.ndim != 5:
-        raise ValueError("normalized_channels must have shape [B,T,A,K,M]")
-    static_shape = (normalized.shape[0], normalized.shape[3])
-    dynamic_shape = (
-        normalized.shape[0],
-        normalized.shape[1],
-        normalized.shape[3],
-    )
-    if rhos.shape not in (static_shape, dynamic_shape):
-        raise ValueError("rhos must have shape [B,K] or [B,T,K]")
-    if bootstrap_samples <= 0:
-        raise ValueError("bootstrap_samples must be positive")
-    rng = np.random.default_rng(0) if rng is None else rng
-
-    sequences = normalized.transpose(0, 2, 3, 4, 1).reshape(
-        -1, normalized.shape[1]
-    )
     valid_lags = np.asarray(
         sorted({int(lag) for lag in lags if 0 < lag < normalized.shape[1]})
     )
-    if valid_lags.size == 0:
-        raise ValueError("At least one lag must be between 1 and T - 1")
-
+    if normalized.ndim != 5 or not valid_lags.size:
+        raise ValueError("Expected channels [B,T,A,K,M] and valid positive lags")
+    sequences = normalized.transpose(0, 2, 3, 4, 1).reshape(
+        -1, normalized.shape[1]
+    )
     empirical = []
-    theory = []
-    confidence_intervals = []
+    theoretical = []
     for lag in valid_lags:
-        numerators = np.mean(
-            (sequences[:, lag:] * sequences[:, :-lag].conj()).real,
-            axis=1,
-        )
-        denominators = np.mean(np.abs(sequences[:, :-lag]) ** 2, axis=1)
-        empirical.append(float(numerators.sum() / denominators.sum()))
-        if rhos.ndim == 2:
-            theory.append(float(np.mean(rhos**lag)))
-        else:
-            products = np.ones(
-                (normalized.shape[0], normalized.shape[1] - lag,
-                 normalized.shape[3]),
-                dtype=np.float64,
+        previous = sequences[:, :-lag]
+        following = sequences[:, lag:]
+        empirical.append(
+            float(
+                np.sum((following * previous.conj()).real)
+                / np.sum(np.abs(previous) ** 2)
             )
-            for offset in range(lag):
-                products *= rhos[:, offset:offset + products.shape[1]]
-            theory.append(float(products.mean()))
-        sample_indices = rng.integers(
-            0,
-            sequences.shape[0],
-            size=(bootstrap_samples, sequences.shape[0]),
         )
-        bootstrap_values = (
-            numerators[sample_indices].sum(axis=1)
-            / denominators[sample_indices].sum(axis=1)
+        products = np.ones(
+            (rhos.shape[0], rhos.shape[1] - lag, rhos.shape[2])
         )
-        confidence_intervals.append(
-            np.quantile(bootstrap_values, (0.025, 0.975))
-        )
-
-    reduce_axes = (0, 2, 3, 4)
+        for offset in range(lag):
+            products *= rhos[:, offset : offset + products.shape[1]]
+        theoretical.append(float(products.mean()))
     return {
         "lags": valid_lags,
         "empirical_correlation": np.asarray(empirical),
-        "theoretical_correlation": np.asarray(theory),
-        "bootstrap_95_ci": np.asarray(confidence_intervals),
-        "real_mean_by_period": normalized.real.mean(axis=reduce_axes),
-        "imag_mean_by_period": normalized.imag.mean(axis=reduce_axes),
-        "real_variance_by_period": normalized.real.var(axis=reduce_axes),
-        "imag_variance_by_period": normalized.imag.var(axis=reduce_axes),
+        "ar1_correlation": np.asarray(theoretical),
+        "max_ar1_error": np.asarray(
+            np.max(np.abs(np.asarray(empirical) - theoretical))
+        ),
+        "real_mean": np.asarray(normalized.real.mean()),
+        "imag_mean": np.asarray(normalized.imag.mean()),
+        "real_variance": np.asarray(normalized.real.var()),
+        "imag_variance": np.asarray(normalized.imag.var()),
+        "finite": np.asarray(np.isfinite(normalized).all()),
+    }
+
+
+def independent_channel_diagnostics(
+    speed_mps,
+    lags=(1, 2, 5, 10, 20),
+    sample_count=50000,
+    seed=0,
+    carrier_frequency_hz=2.6e9,
+    decision_period_s=0.001,
+):
+    """Statistical gate using independent normalized channel sequences."""
+    if sample_count <= 0:
+        raise ValueError("sample_count must be positive")
+    lags = np.asarray(sorted({int(lag) for lag in lags if lag > 0}))
+    rng = np.random.default_rng(seed)
+    rho = jakes_correlation(
+        speed_mps, carrier_frequency_hz, decision_period_s
+    )
+    samples = np.empty((sample_count, int(lags.max()) + 1), np.complex128)
+    samples[:, 0] = complex_normal(sample_count, rng)
+    scale = np.sqrt(max(0.0, 1 - rho**2))
+    for period in range(1, samples.shape[1]):
+        samples[:, period] = (
+            rho * samples[:, period - 1]
+            + scale * complex_normal(sample_count, rng)
+        )
+    empirical = np.asarray(
+        [
+            np.sum((samples[:, lag] * samples[:, 0].conj()).real)
+            / np.sum(np.abs(samples[:, 0]) ** 2)
+            for lag in lags
+        ]
+    )
+    ar1 = rho**lags
+    doppler_hz = carrier_frequency_hz * speed_mps / SPEED_OF_LIGHT_MPS
+    exact_jakes = torch.special.bessel_j0(
+        torch.as_tensor(
+            2 * np.pi * doppler_hz * decision_period_s * lags,
+            dtype=torch.float64,
+        )
+    ).cpu().numpy()
+    return {
+        "speed_mps": np.asarray(speed_mps),
+        "doppler_hz": np.asarray(doppler_hz),
+        "rho": np.asarray(rho),
+        "lags": lags,
+        "empirical_correlation": empirical,
+        "ar1_correlation": ar1,
+        "exact_jakes_reference": exact_jakes,
+        "max_ar1_error": np.asarray(np.max(np.abs(empirical - ar1))),
+        "real_mean": np.asarray(samples.real.mean()),
+        "imag_mean": np.asarray(samples.imag.mean()),
+        "real_variance": np.asarray(samples.real.var()),
+        "imag_variance": np.asarray(samples.imag.var()),
+        "finite": np.asarray(np.isfinite(samples).all()),
+        "sample_count": np.asarray(sample_count),
     }
 
 
@@ -407,7 +425,8 @@ def calculate_rates(
     signal = received_power.diagonal(dim1=1, dim2=2)
     interference = received_power.sum(dim=2) - signal
     sinr = signal / (interference + noise_power)
-    return torch.log1p(sinr) / np.log(2)
+    rate = torch.log1p(sinr) / np.log(2)
+    return rate
 
 
 def cal_loss(

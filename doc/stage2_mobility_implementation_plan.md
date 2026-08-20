@@ -1,395 +1,365 @@
-# Stage 2A Straight-Line Mobility and Stage 2B Hotspot Robustness — Implementation Plan
+# Stage 2 — Mobility Environment 與 Frozen-Model Inference 實驗計畫
 
 ## Material Passport
 
 - Origin Skill: academic-research-suite / experiment-agent
 - Origin Mode: plan
 - Origin Date: 2026-08-18
-- Last Updated: 2026-08-19
-- Verification Status: PARTIALLY IMPLEMENTED（Stage 2A source/checks 已存在；frozen Stage 1B mobility evaluation、2A evidence sweep 與 Stage 2B 尚未完成）
-- Version Label: stage2_mobility_plan_v3
+- Last Updated: 2026-08-20
+- Verification Status: EVIDENCE-AUDITED（mobility/channel 定義與 fairness boundary 已對照文獻；新版 source 尚待重寫與重跑）
+- Version Label: stage2_mobility_plan_v5_evidence_audit
 - Parent Plan: `doc/decentralized_active_csi_experiment_plan.md`
-- Stage 1 Source: `code/stage1/`
-- Stage 1B Gate: ANALYZED / PASSED（`noise_power=1e-12`、5 seeds、2000 iterations；數值與 artifact gate 通過，不代表 C/D 等效）
-- Stage 1 Report: `doc/decentralized_active_csi_experiment_report.md`
+- Living Report: `doc/decentralized_active_csi_experiment_report.md`
+- Frozen Baseline: Stage 1B，`noise_power=1e-12`、5-seed/2000-iteration gate 已通過
 
-## 1. Stage 2A 與 Stage 2B 要回答的問題
+## 1. Stage 2 的唯一任務
 
-Stage 2A 回答：在 Stage 1B 的 no-RIS channel/power/noise convention 下，加入可重現的直線 UE mobility 與 temporally correlated channel 後，凍結的 Stage 1B snapshot beamformer 是否能在固定 association、每期 full current CSI 的條件下 zero-shot 運作？Stage 2A 先變動 evaluation environment，不先重新訓練 beamformer。
+Stage 2 不是新的訓練階段，也不是論文的最終 robustness study。它只做兩件事：
 
-Stage 2B 回答：把外生直線 mobility 換成具有 hotspot preference、dwell 與 revisit 的外生 Markov/semi-Markov mobility 後，Stage 2A 的 centralized/decentralized 結論、方法排名與 fixed-association regret 是否仍成立？
+1. 驗證新的 mobility/channel environment 符合預先定義的物理與統計 contract。
+2. 將 Stage 1B 已訓練完成的 snapshot model 凍結後，放到新環境做 zero-shot inference，確認 pipeline 能正常執行並得到可解讀的大致趨勢。
 
-兩個子階段都不是要證明 temporal policy 優於 snapshot policy，也不加入 dynamic association、feedback budget、stale CSI、CSI age action 或 RL。Stage 2A 是可驗證的 channel/mobility baseline；Stage 2B 是 mobility-model robustness gate。兩者共同提供後續 Stage 3–5 使用的 temporal environments。
+通過 Stage 2 代表後續 Stage 3–5 已有一個可信的「fixed association + full current CSI」時間環境與基準。不代表 frozen model 已對 mobility 最佳化，也不代表某個方法在不同 mobility 下具有統計優勢。
 
-Stage 2 將「開發門檻」與「論文證據門檻」分開。開發門檻先以 Stage 1B frozen checkpoint 評估新 traces；只有當 zero-shot 結果顯示明確 distribution-shift loss，或最終論文需要 matched-training comparison 時，才在 mobility snapshots 上重新訓練。
+### 1.1 Stage 2 要回答的問題
 
-Stage 2B 的 hotspot 選擇若只有狀態轉移機率，正式名稱是 Markov chain；若另顯式建模非 memoryless dwell time，則是 semi-Markov model。只有在 UE 依 action 與 reward 主動選擇下一 hotspot 時才構成 MDP。Ammar et al. [S2-2] 的 POMDP 也把 LSF 當 state、AP association 當 action，而不是把 UE 移動本身當 action；因此本階段不把外生 hotspot trace 誤稱為 MDP。
+> 在不重新訓練、不加入 dynamic association、不限制 CSI feedback 的情況下，Stage 1B frozen snapshot model 能否在正確的 straight-line 與 hotspot/semi-Markov mobility environments 中，以 current CSI 完成 inference，並產生 finite、constraint-valid、可供下一階段比較的 baseline？
 
-## 2. Stage 2A 預先固定的主設計
+### 1.2 Stage 2 不回答的問題
 
-| 項目 | Stage 2A 主設定 | 理由 |
+- 不證明「速度越快，所有方法一定越差」。速度改變的是 temporal correlation；normalized fading 的 marginal distribution 並未因此改變，geometry、fixed association 與抽樣也會影響 rate。
+- 不比較 matched mobility training、domain adaptation 或 train/test mobility matrix。
+- 不宣稱 centralized 優於 decentralized、GNN 優於 MRT/RZF，亦不作 equivalence test。
+- 不使用 trajectory frames 冒充獨立統計樣本。
+- 不加入 dynamic association、switching cost、feedback budget、stale CSI、CSI age、history input、RNN/GRU 或 RL。
+- 不把簡化的 path-loss + first-order Gauss–Markov channel 稱為完整 Jakes simulator 或完整 3GPP channel。
+
+## 2. 為何 hotspot 留在 Stage 2
+
+Hotspot/semi-Markov mobility 和 straight-line mobility 都是 environment generator。兩者共用同一個 channel、fixed association、full current CSI、frozen checkpoint 與 evaluator，因此現在一起實作、測試最省事，也能避免後面才發現 environment contract 不相容。
+
+它在 Stage 2 的角色是「第二種合法環境與 smoke/development evaluation」，不是最終 robustness 證據。等 Stage 3–6 的方法與介面凍結後，Stage 7 再用相同的 straight/hotspot generators、paired traces 與多 seeds，對所有最終方法做正式 robustness 比較。
+
+### 2.1 證據層級與採用邊界
+
+本計畫將「論文有用過」與「本專案為了可控實驗而選定」分開標示：
+
+- **Reference-matched**：直接沿用 reference paper 或 Stage 1 已實作的 geometry、path-loss、power 與 association convention [S2-0]。
+- **Literature-supported structure**：論文支持 straight-line、temporally correlated fading、preferred locations、revisit 或 dwell 這種模型結構，但不代表論文支持本計畫的每一個數值 [S2-1]–[S2-6]。
+- **Controlled synthetic choice**：為了在現有 100 m disk 內可重現地做 environment qualification 而事前凍結的參數。它們不能寫成由實際人類 mobility trace 校準得到。
+
+### 2.2 Fairness audit 結論
+
+| 比較層次 | Stage 2 狀態 | 理由與可做主張 |
 |---|---|---|
-| Source isolation | 新建 `code/stage2/`，只複製 `code/stage1/` 的 source/config/test files | 不修改正在使用的 Stage 1 source，也不讓 Stage 2 artifacts 混入 Stage 1。 |
-| Decision/channel block | $\Delta t=1$ ms | Deng et al. [S2-1] 使用 1 ms LTE subframe/channel-block timescale；這是 CSI aging/update timescale，不是 handoff timescale。 |
-| Carrier frequency | $f_c=2.6$ GHz | 與 [S2-1] 的 mobility/CSI-aging simulation 一致。此參數在 Stage 2 只決定 Doppler correlation，不回頭改 Stage 1 path-loss scale。 |
-| Episode length | $T=2000$ periods（2 s） | 與 [S2-1] 的 2000 blocks 對齊，並讓 80 km/h UE 在一個 episode 內移動約 44.4 m。 |
-| Controlled speeds | 0、3、30 km/h；80 km/h stress test | 3 與 30 km/h 有 3GPP mobility examples [S2-4]；[S2-1] 使用 20/80 km/h 與 40–80 km/h。 |
-| Trajectory | 每個 UE 在一個 episode 內固定速度、固定方向的 straight-line segment | [S2-2] 直接採 straight-line mobility；[S2-3] 也明確允許 straight line 或 random waypoint。主實驗先用最容易驗證的 constant-velocity case。 |
-| Association | 只在 $t=0$ 依 Stage 1 規則產生一次，之後整個 episode 固定 | 確保本階段唯一主要變因是 mobility/channel evolution；dynamic association 留到 Stage 3。 |
-| CSI availability | 每期所有 AP–UE links 都 refresh，`stored_csi[t] == true_csi[t]` | 建立 Stage 4 stale-CSI 實驗的 full-information ground truth。 |
-| Small-scale fading | first-order stationary Gauss–Markov，one-step coefficient 由 Jakes $J_0$ 決定 | 直接採 [S2-1] 的 intermittent-CSI-update channel model。 |
-| Large-scale component | 主設定只依 Stage 1 的 distance/path-loss formula 隨位置更新 | 保持 Stage 1 marginal scale；不在 mobility gate 同時加入新的 shadowing distribution。 |
-| Shadowing | 不納入主 gate；通過後另作 correlated-shadowing sensitivity | [S2-2], [S2-3] 支持 correlated shadowing，但直接加入會同時改變 Stage 1 的 marginal channel distribution。 |
-| Primary model policy | 凍結 Stage 1B `M=2,K=8,Pmax=15,noise=1e-12` checkpoints，evaluation-only | Snapshot GNN 沒有 temporal state；先隔離 environment shift，不把 mobility-specific retraining 混入 Stage 2 gate。 |
-| Optional adaptation | 只在需要時訓練 matched straight/hotspot snapshot models | 以 $R_{\mathrm{matched}}-R_{\mathrm{frozen}}$ 量化 retraining gain，不把 matched model 當成進入 Stage 3 的先決條件。 |
+| 同一 setting 內的四種 beamforming 方法 | **有條件公平** | 只要 Gate 2.4 通過，四法共用 frame、current true channel、mask、noise、power 與 evaluation indices；centralized/local observation scope 是待比較方法本身的差異。 |
+| 0/3/30/80 km/h 的 speed effect | **不是因果比較** | 速度同時改變 Doppler、位移、boundary-conditioned direction 與 fixed-association mismatch；Stage 2 只報環境診斷與 descriptive trend。 |
+| Straight 對 hotspot raw rate | **不可直接當 mobility-model effect** | Hotspot 把 spatial occupancy 集中在內圈，straight 的起點來自整個 UE disk；兩者平均 rate 差同時含 geometry shift。 |
+| 「真實人類 mobility」或「3GPP channel」 | **不支持** | Hotspot 是 synthetic sensitivity environment；channel 是 Jakes-calibrated AR(1) + Stage 1 path loss，不含完整 multipath clusters、spatial consistency 或 shadowing。 |
 
-## 3. Stage 2A user mobility 的正式定義
+## 3. 共用固定設定
 
-### 3.1 位置與速度
+| 項目 | Stage 2 固定值 | 來源／設計角色 |
+|---|---|---|
+| AP/UE/antennas | 5 APs、$K=8$、$M=2$ | [S2-0, Sec. IV, Table I] 的 reference-matched setting。 |
+| Power/noise | $P_{\max}=15$ dBm、`noise_power=1e-12` | $P_{\max}$ 來自 [S2-0, Table I]；noise 是已通過 Stage 1B gate 的 project calibration，不聲稱來自 [S2-0]。 |
+| Model | Stage 1B seed-0 final checkpoint；參數完全凍結 | Controlled evaluation choice，避免把 environment shift 與 retraining gain 混在一起。 |
+| Learned policy | Stage 1B snapshot GNN；每個 frame 獨立 inference | 沿用 [S2-0] 的 snapshot architecture；不聲稱具有 temporal policy。 |
+| Comparators | Centralized GNN、decentralized GNN、MRT、RZF | 比較集來自 Stage 1B；在同一 setting 內共用 environment inputs。 |
+| Decision period | $\Delta t=1$ ms | [S2-1, Sec. VI] 使用 1 ms LTE subframe；本計畫將它當 CSI/channel update period，不當 handoff period。 |
+| Carrier | $f_c=2.6$ GHz | [S2-1, Sec. VI] 的 mobility/CSI-aging simulation setting；只用來算 Doppler。 |
+| Episode | $T=2000$ periods，即 2 s | [S2-1] 使用 2000 blocks；本計畫配合 1 ms period 得 2 s controlled clip。 |
+| Geometry | 5 APs 均勻放在半徑 200 m 圓上；UE 位於半徑 100 m disk | [S2-0, Sec. IV]；Stage 2 不另換 topology。 |
+| Association | 每條 2 s trajectory 僅在 $t=0$ 依 Stage 1 threshold rule 建立，之後固定 | Threshold $0.1$ 來自 [S2-0]；clip 內固定是隔離 dynamic-association effect 的 controlled choice。 |
+| CSI | 每期提供全部 current CSI；所有方法共用同一 frame 與 mask | Fairness control，並作為後續 stale-CSI stage 的 full-information anchor。 |
+| Evaluation unit | seed 0、每個 setting 10 條 trajectories、`eval_time_stride=10` | Development budget，不是論文 inference sample-size 根據。 |
+| Purpose | environment qualification、end-to-end execution、descriptive trend | Scope restriction；正式 paired multi-seed evidence 留到 Stage 7。 |
 
-令 UE $k$ 在 period $t$ 的二維位置為 $\mathbf{x}_{k,t}$，速度為 $v_k$，方向為 $\phi_k$：
+Stage 2 evaluator 不得建立 optimizer、執行 backpropagation、寫 TensorBoard training log，或產生新的 model checkpoint。速度、方向與 history 不提供給 snapshot GNN；mobility 只透過當期 channel 影響輸入。
 
-$$
-\mathbf{x}_{k,t+1}
-=\mathbf{x}_{k,t}
-+v_k\Delta t
-\begin{bmatrix}\cos\phi_k\\\sin\phi_k\end{bmatrix}.
-$$
+## 4. 共用 channel 定義
 
-- $\mathbf{x}_{k,0}$ 沿用 Stage 1 的 UE initial-location generator，故 $t=0$ geometry 不另換分布。
-- 每個 episode/UE 獨立抽 $\phi_k\sim\mathcal U[0,2\pi)$；一個 episode 內不改速度與方向。
-- 為避免 boundary wraparound 造成不連續 channel，抽方向時使用 rejection：只接受終點 $\mathbf{x}_{k,T-1}$ 仍在既有半徑 100 m UE disk 內的方向。圓盤是 convex set，因此起點與終點都在圓內即可保證整條 straight-line segment 在圓內。
-- 這個 boundary rule 是配合現有圓形 geometry 的工程選擇，不宣稱來自 [S2-1]–[S2-4]。Stage 7 才比較 random waypoint、turning 或其他 trajectory models。
-- 主實驗每次讓所有 UEs 使用同一速度，以隔離 speed effect；environment gate 通過後，再加入 mixed-speed setting，例如 $K=8$ 時每個 episode 各有兩名 UE 使用 0/3/30/80 km/h，並依 seed permutation。
+本階段使用的準確名稱是 **Jakes-calibrated first-order Gauss–Markov (AR(1)) channel**。Deng et al. [S2-1, Eqs. (1)–(2)] 使用 first-order stationary Gauss–Markov process 表示 channel aging，並以 Doppler/Jakes coefficient 連結 user speed；Ammar et al. [S2-2, Eqs. (1)–(2)] 也以 $J_0(2\pi \ell f_DT_s)$ 建模 UC-CF-MIMO 中的 temporal channel covariance。
 
-代表速度在 $f_c=2.6$ GHz、$\Delta t=1$ ms 下的預期 one-step correlation 如下：
-
-| Mobility class | $v_k$ | 每步位移 | $f_{D,k}=f_cv_k/c$ | $\rho_k=J_0(2\pi f_{D,k}\Delta t)$ |
-|---|---:|---:|---:|---:|
-| Stationary | 0 km/h | 0 m | 0 Hz | 1.000000 |
-| Pedestrian | 3 km/h | 0.000833 m | 7.222 Hz | 0.999485 |
-| Urban vehicle | 30 km/h | 0.008333 m | 72.222 Hz | 0.949178 |
-| High-mobility stress | 80 km/h | 0.022222 m | 192.593 Hz | 0.666090 |
-
-上述每步位移均遠小於 3GPP TR 38.901 spatial-consistency procedure 的 1 m update-distance upper bound [S2-4]；但 Stage 2 仍是簡化的 path-loss + Gauss–Markov model，不應稱為完整 3GPP channel implementation。
-
-### 3.2 Temporally correlated small-scale fading
-
-對 AP $a$、UE $k$，令 $\mathbf{g}_{a,k,t}\in\mathbb C^M$ 為 normalized small-scale fading：
+令 UE $k$ 的速度為 $v_k$，最大 Doppler frequency 與 one-step coefficient 為
 
 $$
-\mathbf{g}_{a,k,0}\sim\mathcal{CN}(\mathbf 0,\mathbf I_M),
+f_{D,k}=\frac{f_cv_k}{c},\qquad
+\rho_k=J_0(2\pi f_{D,k}\Delta t).
+$$
+
+速度會隨 phase 改變時，上式逐期套用為 $f_{D,k,t}=f_cv_{k,t}/c$ 與 $\rho_{k,t}=J_0(2\pi f_{D,k,t}\Delta t)$。
+
+Normalized small-scale fading 使用 first-order stationary Gauss–Markov model：
+
+$$
+\mathbf g_{a,k,0}\sim\mathcal{CN}(\mathbf 0,\mathbf I_M),
 $$
 
 $$
-\mathbf{g}_{a,k,t+1}
-=\rho_k\mathbf{g}_{a,k,t}
-+\sqrt{1-\rho_k^2}\,\boldsymbol\epsilon_{a,k,t},
+\mathbf g_{a,k,t+1}
+=\rho_{k,t}\mathbf g_{a,k,t}
++\sqrt{1-\rho_{k,t}^2}\,\boldsymbol\epsilon_{a,k,t},
 \qquad
 \boldsymbol\epsilon_{a,k,t}\sim\mathcal{CN}(\mathbf 0,\mathbf I_M).
 $$
 
-不同 AP–UE links、antennas 與 innovation times 使用獨立 innovation；同一 UE 的 links 共用由速度決定的 $\rho_k$。這正是 Deng et al. [S2-1, Eq. (1)–(2)] 用於 heterogeneous-mobility intermittent CSI update 的 first-order stationary Gauss–Markov model。理論上 normalized channel 的 lag-$\ell$ correlation 為 $\rho_k^{\ell}$。
+不同 AP–UE links、antennas 與 innovation times 使用獨立 innovations；同一 UE 的 links 共用由該 UE instantaneous speed 決定的 $\rho_{k,t}$。Straight-line 的 $\rho_{k,t}$ 在 episode 內固定；hotspot model 則依 dwell/transit 的 instantaneous speed 更新。
 
-主設定只選擇 $\rho_k>0$ 的速度/period 組合，因此 empirical correlation 應隨 lag 與速度上升而下降。若未來把參數擴展到 $J_0$ 的負值或 oscillatory region，驗收條件必須改成「符合 signed theoretical curve」，不可再要求全域單調。
-
-### 3.3 保留 Stage 1 large-scale convention
-
-Stage 1 的 direct channel 實際使用 amplitude factor
+這個 AR(1) process 在 constant-speed segment 的 lag-$\ell$ correlation 是
 
 $$
-q_{a,k,t}
-=\frac{10^{-4.5}d_{a,k,t}^{-3.5}}{10^{-7}},
-\qquad
-d_{a,k,t}=\lVert\mathbf b_a-\mathbf x_{k,t}\rVert_2,
+R_{\mathrm{AR(1)}}[\ell]=\rho_k^\ell
+=\left[J_0(2\pi f_{D,k}\Delta t)\right]^\ell,
 $$
 
-因此 Stage 2 主 channel 定義為
+而完整 isotropic-scattering Jakes autocorrelation 是 $R_{\mathrm{Jakes}}[\ell]=J_0(2\pi \ell f_{D,k}\Delta t)$。兩者在多步 lag 不相同；Gate 2.2 必須檢查 $\rho_k^\ell$，不能把實驗結果寫成「完整 Jakes simulator 驗證」。
+
+在 $f_c=2.6$ GHz、$\Delta t=1$ ms 且 $c=3\times10^8$ m/s 下，預先計算的 contract values 為：
+
+| $v_k$ | 每步位移 | $f_{D,k}$ | one-step $\rho_k$ | 角色／來源 |
+|---:|---:|---:|---:|---|
+| 0 km/h | 0 m | 0 Hz | 1.000000 | Stationary compatibility anchor（derived） |
+| 3 km/h | 0.000833 m | 7.222 Hz | 0.999485 | Low-speed example；3GPP 也列 3 km/h mobility cases [S2-3] |
+| 30 km/h | 0.008333 m | 72.222 Hz | 0.949178 | 3GPP spatial-consistency calibration 使用 fixed-speed/random-direction 30 km/h example [S2-3] |
+| 80 km/h | 0.022222 m | 192.593 Hz | 0.666090 | Deng et al. 的 high-mobility example [S2-1, Figs. 3–4] |
+
+保留 Stage 1 direct-channel amplitude convention：
 
 $$
+q_{a,k,t}=\frac{10^{-4.5}d_{a,k,t}^{-3.5}}{10^{-7}},\qquad
 \mathbf h_{a,k,t}=q_{a,k,t}\mathbf g_{a,k,t}.
 $$
 
-這裡刻意保留 Stage 1 的 amplitude/path-loss、channel scale 與 `noise_power=1e-12`，不把其他論文的 $\sqrt{\beta}$、path-loss exponent、height、shadowing 或 noise 數值直接混入。如此 $v=0,t=0$ 可以與 Stage 1 作 paired equivalence check，mobility 才是唯一新增的主要變因。
+[S2-0, Sec. II, Table I] 將 direct AP–UE link 建模為 Rayleigh fading，使用 large-scale amplitude $10^{-4.5}$ 與 exponent $3.5$；除以 $10^{-7}$ 是 Stage 1 code 的 numerical normalization，不是 [S2-0] 的新物理參數。本階段不額外加入 shadowing，以保持 Stage 1 marginal scale，使 $t=0$ 與 0 km/h case 可作 backward-compatibility check。Ammar et al. [S2-2] 的 correlated-shadowing setting 可在後續作獨立 sensitivity，但不應混入本 gate。
 
-主 gate 通過後可增加一個明確標為 sensitivity 的 correlated-shadowing variant。Ammar et al. [S2-2], [S2-3] 使用 6 dB shadowing、100 m decorrelation distance，並以位移決定 successive shadowing correlation；該 variant 必須另存 config/result root，不能取代主設定或用來選擇較好結果。
+## 5. Stage 2A — Straight-Line Mobility
 
-### 3.4 Fixed association 與 full CSI 的精確語意
+### 5.1 Environment 定義
 
-1. 在每條 trajectory 的 $t=0$，沿用 Stage 1 的 instantaneous-RSSI threshold ratio `0.1` 產生 `association_mask`。
-2. `association_mask` 在 $t=1,\ldots,T-1$ 不得重新計算；即使 UE 移動後其他 AP 變強，也保持原 serving set。
-3. 每一期先更新位置與 true channel，再把全部 true channel 複製到 stored channel；所以本階段 `stored_csi[t]` 必須逐元素等於 `true_csi[t]`。
-4. Centralized/decentralized GNN、MRT 與 RZF 在相同 period 使用相同 true channel、固定 mask、noise 與 power constraint。
-5. Beamformer 每期以 current full CSI 重新計算；rate 也以同一期 true CSI 計算。Stage 2 不允許任何 stale channel leakage。
+直線、固定速度是用來隔離 kinematics 與 channel contract 的最小可驗證模型，不是對完整日常移動的擬真。在 UC-CF-MIMO 文獻中，Ammar et al. [S2-2, Sec. VI] 讓 UE 以 10 m/s（36 km/h）做 1 km straight-line trip；Hsu et al. [S2-4, Sec. III-B] 的 community model 也在每個 movement epoch 抽取速度與均勻方向，並在 epoch 內保持 constant-speed random-direction movement。這些證據支持 **model structure**，不支持將本計畫的 boundary rule 當成標準。
 
-## 4. Stage 2A data contract
+每個 UE 在一條 episode 中使用固定速度與方向：
 
-令 $B$ 為 trajectory batch size、$T$ 為 periods、$A=5$ 為 APs、$K$ 為 UEs、$M$ 為 antennas/AP。
+$$
+\mathbf x_{k,t+1}=\mathbf x_{k,t}
++v_k\Delta t[\cos\phi_k,\sin\phi_k]^\mathsf T.
+$$
 
-| Value | Shape | Contract |
+- Initial position 沿用 Stage 1 generator [S2-0]。
+- $\phi_k\sim\mathcal U[0,2\pi)$；以 rejection sampling 確保終點仍在半徑 100 m disk。圓盤為 convex，因此整段路徑都在界內。這是 project-specific boundary choice，且接受後的方向分布會依起點與速度而改變，所以 Stage 2 不能把跨速度 rate 差當成純 Doppler effect。
+- 每個主 setting 中所有 UE 使用相同速度，避免把 heterogeneous speed composition 混入環境驗證。
+- 主 inference speeds 為 0、30、80 km/h：0 是 compatibility anchor；30 是 [S2-3] 使用的 fixed-speed/random-direction calibration example；80 是 [S2-1] 的 high-mobility example。
+- 3 km/h 的 $\rho$ 非常接近 1，先由 deterministic/statistical channel test 覆蓋；不再列為 mandatory full inference。
+- 若下一階段一開始就需要 heterogeneous users，可追加一組 mixed-speed smoke run，例如 8 個 UE 各兩名使用 0/3/30/80 km/h；它不是 Stage 2 通關條件。
+
+若 Stage 7 要估計 speed effect，straight settings 必須改用 paired design：先以最大速度 80 km/h 的 endpoint constraint 抽取可行的 initial position/direction，再將同一組 geometry draws 與 normalized innovation streams 重用於 0/3/30/80 km/h。如此可避免每個速度各自 rejection 造成不同 direction distribution，但結果仍要標示為「在 80-km/h-feasible 軌跡上的 paired estimand」。
+
+### 5.2 必跑矩陣
+
+| Mobility | Speed | Seeds | Trajectories | Stride | 用途 |
+|---|---:|---:|---:|---:|---|
+| Straight | 0 km/h | 0 | 10 | 10 | Stationary/Stage 1 compatibility baseline |
+| Straight | 30 km/h | 0 | 10 | 10 | Literature-anchored fixed-speed development case |
+| Straight | 80 km/h | 0 | 10 | 10 | High-mobility stress case |
+
+這三組只報告 descriptive mean/tail summaries 與環境 diagnostics。不得從三個 means 推論單調 speed effect，除非 Stage 7 使用 paired traces、多 seeds 與預先登記的 estimand 重新測試。
+
+## 6. Stage 2B — Hotspot/Semi-Markov Mobility
+
+### 6.1 Environment 定義
+
+Hotspot mobility 是外生 semi-Markov process，不是 MDP：destination 與 dwell 不受 rate、association 或任何待比較方法控制。Hsu et al. [S2-4] 以 community attraction、local/roaming Markov transitions、movement epochs 與 pause time 表示 preferred-location mobility；González et al. [S2-5] 的軌跡資料顯示個人會重返少數高頻地點；TimeGeo [S2-6] 則將 dwell/burst 時間機制與 spatial destination selection 分開建模。這三篇文獻支持 preferred locations + revisit + explicit dwell 的 **結構**，但不提供本計畫可直接照抄的 4 個 centers、$0.6$ self-transition 或 Gamma$(2,2.5\,\mathrm{s})$ 參數。
+
+主設定固定為：
+
+- 4 個 hotspot centers：$(\pm35,0)$、$(0,\pm35)$ m；hotspot radius 10 m。所有 hotspot points 均位於半徑 45 m 內，因此任兩點間的直線 transit 也位於 100 m convex UE disk。這是對稱、可驗證的 controlled synthetic geometry，不是 trace-calibrated geometry。
+- 每個 UE 的 initial hotspot state 從 $\{1,2,3,4\}$ 均勻抽取，initial physical position 在該 hotspot disk 內依面積均勻抽取。同一 multi-UE trajectory 中的 UEs 使用獨立 state/target/dwell RNG substreams，不預設同步轉移。
+- Symmetric transition matrix 定義為 $P_{ii}=0.6$、$P_{ij}=0.4/3$ for $i\ne j$；其 event-chain stationary distribution 為 uniform。這是 medium-stickiness diagnostic choice，不是 [S2-4]–[S2-6] 的估計值。
+- 每個 macro event 的 dwell duration 使用 Gamma distribution，shape $2$、scale $2.5$ s、mean $5$ s。非 exponential dwell 使 process 成為 semi-Markov；shape $2$ 只是避免 memoryless holding time 的 controlled choice，不宣稱為人類 dwell 的 empirical fit。
+- Self-transition 會在原 hotspot 開始新的 dwell event，不產生 transit，也不重抽 physical target。因此「event dwell mean」為 5 s，但連續 self-events 合併後的同一-hotspot residence mean 為 $5/(1-0.6)=12.5$ s；兩個統計量必須分開報告。
+- 當 $j\ne i$ 時，在 destination hotspot disk 內依面積均勻抽取 physical target，再以指定 transit speed 沿直線連續前往；不得 teleport。
+- Dwell phase **固定為靜止**，不保留「靜止或局部移動」的未定義分支。因此 dwell 時 instantaneous speed $=0$、$\rho=1$，transit 時才使用設定速度。這是對 Hsu et al. pause state [S2-4] 的簡化對應，也意味本模型不含 stationary-UE 時由環境 scatterer 造成的 fading。
+- 每條 evaluation trajectory 使用獨立 parent macro trace 與 RNG substream。先捨棄 burn-in，長度至少為 `max(120 s, 10 × configured mean dwell-plus-transit cycle)`；之後保留 300 s macro trace，再從保留區間的合法 start times 均勻抽一個 2 s clip。均勻抽 natural time，不是均勻抽 event，才會保留長 dwell/transit 應有的 time occupancy。
+- 每個 2 s clip 在 $t=0$ 建立一次 association，clip 內固定。
+
+獨立 parent traces 是為了避免 10 個 clips 共享同一條 300 s trace 而形成隱性 pseudo-replication。300 s 只是 inference clip pool，不是 transition-matrix/dwell tolerance 的統計樣本；Gate 2.3 必須使用另一條夠長的 environment-only diagnostic stream。
+
+### 6.2 必跑矩陣
+
+| Mobility | Transit speed | Seeds | Trajectories | Stride | 用途 |
+|---|---:|---:|---:|---:|---|
+| Hotspot semi-Markov | 3 km/h | 0 | 10 | 10 | Slow-transit / long-travel-time stress case |
+| Hotspot semi-Markov | 30 km/h | 0 | 10 | 10 | Main case |
+| Hotspot semi-Markov | 80 km/h | 0 | 10 | 10 | Fast transit stress case |
+
+Hotspot 0 km/h 不執行：UE 無法合理移往下一 hotspot，會使 transition 與 transit 語意失真。
+
+這三組速度同時改變 Doppler 與 transit duration，所以 natural-time clips 中 dwell/transit 的比例也會跟著改變。特別是 3 km/h 在相距約 50–70 m 的 hotspots 間可能長時間處於 transit，不應再標為 dwell-dominant。Stage 2 只驗證 generator 對這個物理結果的 accounting 是否正確。
+
+### 6.3 額外 hotspot diagnostics
+
+為確認 generator 不是只在單一參數下碰巧正確，再增加兩組 environment-only diagnostics，不跑四種 beamforming inference：
+
+- Low-stickiness / short-dwell：$P_{ii}=0.2$、$P_{ij}=0.8/3$、Gamma shape $2$、mean $2$ s；檢查頻繁 transition、continuity 與 event accounting，merged same-hotspot residence mean target 為 $2/(1-0.2)=2.5$ s。
+- High-stickiness / long-dwell：$P_{ii}=0.8$、$P_{ij}=0.2/3$、Gamma shape $2$、mean $10$ s；檢查長 dwell、occupancy 與 clip sampling，merged same-hotspot residence mean target 為 $10/(1-0.8)=50$ s。
+
+這些數值是以主設定為中心的對稱工程 stress choices，不是 [S2-4]–[S2-6] 的 empirical estimates。它們只驗證 state、dwell、position、boundary 與 channel statistics，不作性能比較，也不以結果選擇較好看的主參數。
+
+## 7. 最小實作範圍
+
+新版 `code/stage2/` 應是 evaluation-only package，保留最少責任：
+
+| Component | 責任 |
+|---|---|
+| Environment | 產生 straight/hotspot positions、phase/state、current channel 與固定 mask |
+| Evaluator | 載入 frozen Stage 1B checkpoint，執行 C/D GNN、MRT、RZF |
+| Model compatibility | 使用與 Stage 1B 完全相容的 architecture/state dict；不改模型語意 |
+| Tests | 驗證 kinematics、channel、hotspot process、mask、power、reproducibility |
+| Runner | 只展開本文件的 6 組 mandatory inference 與 environment-only diagnostics |
+
+不要加入 `train.py`、optimizer、matched-training flags、trajectory train/validation split 或 $2\times2$ train/test matrix。若沿用 `trainer_2.py` 檔名以相容既有操作，它的角色仍只能是 evaluation entry point。
+
+## 8. Mandatory Gates
+
+### Gate 2.0 — Provenance 與 Stage 1 相容性
+
+- 啟動前保存 Stage 2 source snapshot、Git commit/dirty status、source SHA-256 與 frozen checkpoint SHA-256。
+- 使用相同 positions、initial fading、mask 與 beamformers 時，Stage 2 的 $t=0$ rate 與 Stage 1 在 `atol=1e-6, rtol=1e-6` 內一致。
+- 0 km/h 時 position、path loss 與 channel 在同一 trajectory 內不變。
+
+### Gate 2.1 — Mobility kinematics
+
+- Straight-line 每步位移與 $v\Delta t$ 的誤差小於 `1e-10` m。
+- 所有 positions 位於半徑 100 m disk；hotspot transition 不可跳躍，step length 不超過 instantaneous-speed limit。
+- 相同 seed 的 positions/states/channels 完全可重現；不同 seed 不得意外相同。
+
+### Gate 2.2 — Channel statistics
+
+- Normalized real/imaginary parts 必須 finite；在獨立產生、未經 path loss 加權的 diagnostic sample 上，`abs(mean) <= 0.02` 且 `abs(variance - 0.5) <= 0.02`。
+- Constant-speed segments 的 empirical lag correlations 對 **AR(1) contract** $\rho^\ell$ 的 maximum absolute error `<=0.02`；另存 exact-Jakes $J_0(2\pi\ell f_D\Delta t)$ 作為 model-gap reference，但不用它驗收 AR(1) generator。
+- 每期 distance 與 path-loss factor 精確符合 Stage 1 公式。
+- 0、3、30、80 km/h channel coefficients 均由 unit/statistical test 覆蓋，即使 3 km/h 不跑 straight full inference。
+
+### Gate 2.3 — Hotspot process
+
+- Transition/dwell/occupancy tolerance 使用獨立 environment-only diagnostic stream，不從 10 個 inference clips 估計。Diagnostic stream 至少包含 10,000 個 post-burn-in macro events，且每個 state 至少有 2,000 個 outgoing events；不足就延長 stream，不放寬 tolerance。
+- Empirical event-transition matrix 對 configured matrix 的 maximum absolute error `<=0.05`；event-chain occupancy 對 uniform stationary distribution 的 maximum absolute error `<=0.03`。另外報告 natural-time 的 hotspot/transit occupancy，並對照長時間 reference simulation；不把 event occupancy 與 time occupancy 混為同一統計量。
+- Empirical **event dwell** mean 對各 variant configured mean 的 relative error `<=5%`；另報告連續 self-events 合併後的 same-hotspot residence mean，main/low/high 的 targets 分別為 12.5/2.5/50 s。保存 event count、mean、variance 與預先指定的 quantiles。
+- Main、low-stickiness/short-dwell、high-stickiness/long-dwell 三組都通過 event accounting、boundary 與 physical continuity tests；step-limit maximum violation `<=1e-10` m。
+- Dwell/transit channel correlation 分別符合各自 instantaneous-speed coefficient；dwell 的 $\rho=1$ 應使 normalized channel 逐步完全不變。
+
+### Gate 2.4 — Fair inference
+
+- 四種方法在同一 trajectory/frame 使用完全相同的 current channel、association mask、noise 與 power constraint。
+- 四種方法使用完全相同的 trajectory order、frame indices 與 `eval_time_stride`，不可因方法而重抽 clips 或 channels。
+- Centralized GNN 可讀 global current CSI，decentralized GNN 只讀各 AP 的預定 local current CSI；這是方法定義的 information-structure difference，必須在 config 與報告中明列，不能誤寫成四法 observation 完全相同。
+- Association mask 在整個 2 s clip 內不變。
+- Beamformers 與 rates 全部 finite；unassociated links 為零，每個 AP 均符合 power limit。
+- Rate 由同一期 current true channel 計算，不使用 future channel、mobility state 或隱含 dynamic reassociation。
+
+### Gate 2.5 — End-to-end completion
+
+- Straight 0/30/80 與 hotspot 3/30/80 六組皆完成 seed-0、10-trajectory、stride-10 inference。
+- 每組保存完整有效 config、compact raw metrics、environment diagnostics、summary、source/checkpoint hashes 與 log。
+- 本 gate 只要求 pipeline 正確與 coarse trend 可讀；不要求 rate 隨速度單調下降，也不要求任何方法獲勝。
+
+## 9. Outputs 與 Metrics
+
+每組 mandatory run 最少保存：
+
+- effective config、seed、source/checkpoint hashes、evaluation indices；
+- 每條 trajectory 的 average sum rate；
+- 每條 trajectory 的 UE time-average rates 與 descriptive 5th-percentile summary；
+- C/D GNN、MRT、RZF 的 finite/power/mask checks；
+- trajectory、speed/phase、distance/path-loss 與 selected channel-correlation diagnostics；
+- hotspot runs 的 state、dwell、transition、occupancy 與 continuity diagnostics；
+- completion status 與 log。
+
+不必為 full-current-CSI 額外保存一份重複的 `stored_channels` 大陣列；以單一 current-channel source 加上 contract test 證明 evaluator 沒有 stale-CSI branch 即可。只有 Stage 4 實作 stale CSI 時，才同時保存 true/stored channels 與 age。
+
+Stage 2 的性能數值只以表格或小圖呈現大致趨勢。`fixed_association_regret`、current-RSSI reassociation 與 strongest-AP switching 屬於 Stage 3 的變因；若保留舊 pilot diagnostic，只能標為歷史觀察，不應留在新版 Stage 2 evaluator。
+
+## 10. 執行順序與時間預算
+
+| 工作 | 組數 | 觀察/估計時間 |
+|---|---:|---:|
+| Straight 0/30/80 km/h | 3 | 約 30 分 53 秒（既有觀察） |
+| Hotspot 3/30/80 km/h | 3 | 約 31–32 分鐘（依 30 km/h 的 10 分 31 秒估計） |
+| Mandatory inference 合計 | 6 | 約 62–63 分鐘 |
+| Optional mixed-speed smoke run | 1 | 約 10–11 分鐘 |
+| Hotspot environment-only variants | 2 | 不執行四方法 inference，應顯著短於完整 run |
+
+建議順序：contract tests → straight 0 → straight 30/80 → hotspot main environment tests → hotspot 30 → hotspot 3/80 → environment-only variants → optional mixed-speed。
+
+## 11. 通關與停止規則
+
+Stage 2 在 Gates 2.0–2.5 全部通過後即結束，可以進入 Stage 3 或 Stage 4。以下都不是阻擋條件：
+
+- 個別速度的 rate 未單調下降；
+- centralized/decentralized gap 很小或正負改變；
+- GNN 未勝過 MRT/RZF；
+- seed-0 不足以支持統計結論。
+
+只有 environment contract、fairness、constraint、provenance 或 end-to-end execution 失敗才需要停下修正。修正後重跑受影響設定，不因性能結果不好而改 mobility 參數。
+
+## 12. 延後到 Stage 7 的正式證據
+
+等 Stage 3–6 的最終方法、observation、action 與 evaluator 凍結後，再一次完成正式 robustness matrix：
+
+- straight 與 hotspot；
+- 預先指定的 speeds、feedback budgets、switching costs 與 network sizes；
+- 所有最終方法加上 frozen Stage 1B snapshot baseline；
+- 至少 5 個 paired seeds，所有方法共用相同 traces/innovations；
+- Straight speed comparison 使用第 5.1 節的 max-speed-feasible paired initial positions/directions，不讓每個 speed 各自 rejection；
+- Hotspot comparison 預先區分兩種 estimand：自然時間的 **system effect** 可讓 speed 改變 transit 佔比，但要共用 event-state/target/dwell random streams 並報告 phase proportions；若要估計 Doppler-only effect，必須另建 fixed-geometry/channel sensitivity，不可與前者混稱為 speed effect；
+- 必要時使用 `eval_time_stride=1`，以 seed 或完整 trajectory aggregate 作統計單位；
+- 報告 paired effect、confidence interval、effect size 與多重比較控制。
+
+這樣只在最終需要論文推論時支付多-seed/full-stride 成本，也避免 Stage 2 先替尚未完成的方法做一套之後必須重跑的 evidence sweep。
+
+## 13. 舊版 pilots 的處理
+
+2026-08-19 的 straight 0/30/80 km/h 與 hotspot 30 km/h frozen pilots 保留在 living report，作為新版重寫前的設計依據與 runtime reference。它們支持以下判斷：
+
+- inference 約每組 10–11 分鐘，因此新版可合理擴成 6 組；
+- rate 不隨速度單調改變，符合本階段不作 speed-effect inference 的定位；
+- hotspot generator 值得留在 Stage 2，但單一 30 km/h case 不足以覆蓋 slow/fast transit；
+- 舊 matched-training run 有 provenance anomaly，不納入新版 Stage 2，也不重跑。
+
+舊 pilots 不自動使新版 Stage 2 通關。新版 source 完成後，仍須以新的 provenance snapshot 與 output contract 重跑本文件的 mandatory matrix。
+
+## 14. Environment/channel 定義—證據對照表
+
+| 定義 | 證據 | 本計畫的採用與限制 |
 |---|---|---|
-| `ue_positions` | `[B,T,K,2]` real | 公尺；每條軌跡符合固定速度與直線運動。 |
-| `ue_speeds_mps` | `[B,K]` real | 一個 episode 內固定。 |
-| `ue_directions_rad` | `[B,K]` real | 一個 episode 內固定。 |
-| `true_channels` | `[B,T,A,K,M]` complex | 每期實際 direct AP–UE channel。 |
-| `stored_channels` | `[B,T,A,K,M]` complex | Stage 2 必須與 `true_channels` 完全相同。 |
-| `association_mask` | `[B,K,A]` boolean | $t=0$ 建立後整條 trajectory 固定。 |
-| `centralized_features` | `[B,T,1,A*K,2*M]` real | Stage 1 AP-major layout 加入 time axis。 |
-| `decentralized_features` | list of $A$ tensors `[B,T,1,K,2*M]` | 每個 AP 的 current local view。 |
-
-Snapshot GNN 不新增 RNN/GRU。訓練 sampler 可從 training trajectories 抽 `(trajectory_id, t)` frames，但 train/validation/test 必須按完整 trajectory 切分，不能把同一軌跡的相鄰 frames 分到不同 splits，否則 temporal correlation 會造成資料洩漏。
-
-## 5. Stage 2A source layout
-
-Stage 2A source 位於 `code/stage2/`，來源只包含下列 Stage 1 source/config/test files；Stage 2B 直接擴充同一份 source tree，不再複製 trainer/model：
-
-| Stage 2 file | 起點 | Stage 2A 責任 |
-|---|---|---|
-| `data.py` | `code/stage1/data.py` | 新增 trajectory generation、time-axis views、fixed-$t=0$ mask 與 true/stored CSI accessors。 |
-| `utils_return_indivial_rates.py` | Stage 1 同名檔 | 加入 Jakes coefficient、Gauss–Markov transition 與 position-dependent sequence channel generation；保留 rate/MRT/RZF conventions。 |
-| `model_2.py` | Stage 1 同名檔 | 初期不改 architecture；只在必要時支援將 `[B,T]` flatten/unflatten。 |
-| `trainer_2.py` | Stage 1 同名檔 | 新增 mobility CLI/config、trajectory split/sampling、checkpoint evaluation-only、per-period evaluation 與 temporal diagnostics。 |
-| `run_exp-v2.sh` | Stage 1 同名檔 | 開發期執行 frozen Stage 1B checkpoint 的 0/30/80 km/h pilot；full matched-training sweep 延後。 |
-| `test_stage2.py` | `code/stage1/test_stage1.py` | 保留 Stage 1 assertions，再加入 mobility/channel/full-CSI/fixed-mask tests。 |
-
-不得複製 `__pycache__/`、`results_stage1*/`、checkpoints、logs 或其他 artifacts。Stage 2 預設 output 必須使用 `results_stage2*`。複製當下記錄 source commit、dirty status 與六個來源檔案的 SHA-256；目前 Stage 1 working tree 有未提交修改，因此不能只記 `git rev-parse HEAD` 就宣稱 source provenance 完整。
-
-目前 development pilot 的 CLI 介面如下；`--checkpoint` 存在時不建立 optimizer、不執行 training loop，只產生 traces 並評估。所有 effective values 與 checkpoint SHA-256 都寫入每個 run 的 config：
-
-```bash
-python trainer_2.py \
-  --M 2 --K 8 --pmax_dbm 15 --batch_size 8 --runs 1 \
-  --n_iter 2000 --noise_power 1e-12 \
-  --speed_kmh 30 --decision_period_s 0.001 \
-  --carrier_frequency_hz 2.6e9 --episode_steps 2000 \
-  --train_trajectories 1 --test_sample_val 1 --test_sample_final 10 \
-  --eval_time_stride 10 \
-  --checkpoint ../stage1/results_stage1b_full_noise_1e-12/M2_K8_P15.0/run0/models/model_final_run0.pt \
-  --device cuda:0 --out_dir results_stage2a_frozen_stage1_seed0_speed_30
-```
-
-## 6. Stage 2A mandatory gates
-
-### Gate 2A.0 — Source isolation
-
-- `code/stage2/` 僅含 source/test files，沒有 Stage 1 artifacts。
-- 未修改 `code/stage1/`。
-- 保存來源檔案 checksums、copy date 與 Stage 1 validation status。
-
-### Gate 2A.1 — Paired backward compatibility
-
-- 以相同 AP/UE positions、initial fast-fading draw、association mask 與 beamformers 比較 Stage 1 和 Stage 2 的 $t=0$ rate，誤差限 `atol=1e-6, rtol=1e-6`。
-- $v=0$ 時 positions 與 true channel 在單一 episode 內保持不變；跨多條獨立 trajectories 的 $t=0$ channel/rate distribution 應與 Stage 1 相容。
-- 不要求單一 stationary trajectory 的 time average 等於 Stage 1 ensemble mean，因為 $v=0$ 時重複的是同一 channel realization。
-
-### Gate 2A.2 — Mobility kinematics
-
-- 每一步位移誤差小於 `1e-10` m（boundary-free accepted straight segment）。
-- 所有 positions 留在半徑 100 m disk 內。
-- 固定 seed 產生完全相同的 positions、directions 與 channels；不同 seed 不得意外相同。
-
-### Gate 2A.3 — Channel statistics
-
-- 對 normalized $\mathbf g$ 而非含 path-loss 的 $\mathbf h$ 計算 correlation。
-- 每個 speed 使用足夠 links/trajectories，報告 empirical lag-1 與多個 lag correlations、95% bootstrap CI，以及理論值 $\rho_k^{\ell}$。
-- 預先 gate：theoretical value 落在 empirical 95% CI，或 absolute error `<= 0.02`；兩者至少符合一項。若樣本不足導致 CI 太寬，增加 trajectories，不調整 $\rho$。
-- 每個 $t$ 的 normalized real/imaginary mean 接近 0、variance 接近 Stage 1 complex-normal convention，且所有 values finite。
-- Distance/path-loss factor 必須逐期符合 $q_{a,k,t}$ 公式。
-
-### Gate 2A.4 — Fixed association and full CSI
-
-- `association_mask[:,t]` 若在 runtime 展開，必須對所有 $t$ 與 $t=0$ 完全相同。
-- `stored_channels` 與 `true_channels` 必須逐元素相同。
-- 所有方法每期共用同一 current channel/mask；rate 只由 true current channel 評估。
-- 每個 AP 的 beamformer 仍符合 association mask 與 per-AP power limit。
-
-### Gate 2A.5 — Controlled experiment
-
-**Development gate（進入 Stage 3 前）**
-
-- 將 Stage 1B seed-0 frozen checkpoint evaluation-only 於 homogeneous 0/30/80 km/h；3 km/h 延後至 evidence gate。
-- 每個 speed 使用固定 seed、可重現且彼此獨立的 test trajectories；pilot 使用 10 條 test trajectories，並以 `eval_time_stride=10` 評估每條軌跡的 200 個等距 frames。完整 2000-step environment/channel traces 與 diagnostics 仍保存。跨 speed 的嚴格 paired innovations 留到 evidence gate，開發期不把 frame 當成配對統計樣本。
-- 不要求跨 seed 推論；只檢查 end-to-end execution、finite metrics、constraints 與初步趨勢。
-- 現有 speed-0 matched-training run 完成後保留為單一 adaptation diagnostic，不自動繼續後續 19 runs。
-
-**Evidence gate（方法與介面凍結後再補）**
-
-- 凍結的 Stage 1B checkpoints 完成 0/3/30/80 km/h paired evaluation，至少 5 seeds；主結果使用 `eval_time_stride=1`，並可將 stride-10 結果列為計算成本 sensitivity。
-- 若需宣稱 mobility-specific adaptation，才對相同 settings 增加 matched-training models，並報告 adaptation gain。
-
-保存：
-
-- long-term average sum rate 與 5th-percentile UE rate；
-- centralized/decentralized/MRT/RZF 的 paired per-trajectory metrics；
-- empirical channel autocorrelation vs. lag；
-- UE trajectories、distance/path-loss traces、fixed association mask；
-- config、seed、source checksum、checkpoint、raw metrics 與 logs。
-
-速度上升不預先要求 sum rate 單調下降：Gauss–Markov model 改變 temporal correlation，不改 normalized channel 的 marginal distribution；固定 association 下的 rate 也同時受具體移動方向與 distance evolution 影響。Stage 2A 的 mandatory conclusion 是 environment 是否符合預先定義的 dynamics，而不是某方法是否勝出。
-
-## 7. Stage 2A 與 Stage 2B 明確不做的事
-
-- 不依新位置重新計算 association。
-- 不限制 feedback budget，也不保留 stale CSI。
-- 不讓 model 讀取速度、方向、history 或 future CSI。
-- 不加入 RNN/GRU、RL、switching cost 或 CSI-update action。
-- 不把 Ammar et al. 的 1 s/5 s handoff step 當作 CSI channel block。
-- 不宣稱 simplified model 為完整 3GPP-compliant channel。
-- 不根據 centralized/decentralized gap、GNN 是否勝過 MRT/RZF，或個別 seed 的結果調整 mobility parameters。
-- 不讓 rate、AP association 或任何待比較方法的輸出控制 Stage 2B 的 hotspot transition；否則 mobility 會成為內生 policy，破壞方法間的共同環境。
-- 沒有實際 mobility trace 校準時，不把 Stage 2B 宣稱為真實人類 mobility ground truth；只稱 synthetic hotspot sensitivity model。
-
-## 8. Stage 2B — Hotspot-aware mobility robustness
-
-### 8.1 Research question、變因與預期作用
-
-Stage 2B 的 independent variable 是 mobility generator：Stage 2A straight line 對 Stage 2B hotspot-aware Markov/semi-Markov。Channel、AP geometry、power/noise convention、fixed association、full current CSI、beamforming methods、training budget 與 evaluation code 都保持不變。
-
-Hotspot model 不預先假設 rate 一定下降。若 hotspot 靠近 AP，平均 rate 可能增加；若 hotspot 位於不同 AP 的優勢區或邊界，association mismatch、handoff pressure 與 tail-rate loss 可能增加。主要 estimand 是 mobility model 是否改變 centralized/decentralized gap：
-
-$$
-\Delta_{\mathrm{interaction}}
-=
-\left(R_C-R_D\right)_{\mathrm{hotspot}}
--
-\left(R_C-R_D\right)_{\mathrm{straight}}.
-$$
-
-Stage 2B 同時檢查方法排名、5th-percentile UE rate 與 fixed-association regret，不能只比較兩個 environment 的 raw mean rate，因為兩者的 spatial occupancy 本來就可能不同。
-
-### 8.2 兩個 timescales 與連續位置
-
-令 $z_{k,n}\in\{1,\ldots,J\}$ 為 UE $k$ 在第 $n$ 個 macro mobility epoch 的 hotspot state，$q_n$ 為預先固定的 time-period class：
-
-$$
-z_{k,n+1}\sim P_k^{(q_n)}\left(z_{k,n},\cdot\right),
-\qquad
-D_{k,n}\sim F_{z_{k,n},q_n}.
-$$
-
-$P_k^{(q)}$ 控制 hotspot transition 與 revisit；$D_{k,n}$ 是該 hotspot 的 dwell duration。若 $D$ 完全由固定 macro tick 的 self-transition 產生，模型可退化為普通 Markov chain；主 sensitivity 使用顯式 dwell distribution，避免把每個 1 ms channel block 當成一次人類 destination decision。
-
-每次 transition 先在下一 hotspot 區域內抽取 physical target $\mathbf y_{k,n+1}$，再沿用 Stage 2A 的 constant-speed integrator：
-
-$$
-\mathbf x_{k,t+1}
-=
-\mathbf x_{k,t}
-+
-\min\!\left(v_{k,t}\Delta t,
-\lVert\mathbf y_{k,n+1}-\mathbf x_{k,t}\rVert_2\right)
-\frac{\mathbf y_{k,n+1}-\mathbf x_{k,t}}
-{\lVert\mathbf y_{k,n+1}-\mathbf x_{k,t}\rVert_2}.
-$$
-
-- 不允許 hotspot 切換時 teleportation、position discontinuity 或跨 boundary 瞬移。
-- 若抽到與目前位置相同的 target，直接進入 dwell，不計算零長度方向向量。
-- Transit 使用受控速度；dwell 可設為靜止或 hotspot 內局部移動。對應的 instantaneous $v_{k,t}$ 必須用於 $\rho_{k,t}=J_0(2\pi f_c v_{k,t}\Delta t/c)$。
-- Fine channel block 保留 $\Delta t=1$ ms；hotspot transition/dwell 位於較慢的 macro timescale。Ammar et al. [S2-3] 也將 5 s mobility/HO decision step 與 $66.7\ \mu$s channel sampling period 分開。
-- 現有 2 s episode 中，3/30/80 km/h 只約移動 1.67/16.67/44.44 m，通常不足以觀察多次 hotspot revisit。Stage 2B 先生成足以含多個 transition 的 long macro trace，再按 trace 中實際時間占比抽取 2 s clips；另分開報告 dwell 與 transit clips，不改變主分析的自然時間權重。
-- 每個 2 s clip 的 association mask 在 clip 的 $t=0$ 建立後固定，以維持 Stage 2 語意。從 long macro episode 起點一路凍結 association 的結果只能列為 secondary stress test。
-
-### 8.3 Hotspot geometry 與參數凍結
-
-- Hotspot centers、半徑、transition matrices、dwell distributions 與 time-period classes 必須在查看 rate 結果前凍結並寫入 config。
-- Hotspot geometry 不得由 centralized/decentralized model、learned beamformer 或 rate surface 產生。
-- 每個 UE 可有不同的 frequent hotspots，但在 population level 需用 seed permutation 平衡 hotspot assignment，避免所有 UEs 被人為集中到同一 AP 附近。
-- 若沒有實際 trace，至少預先登記 low/medium/high stickiness 或 dwell sensitivity；不可只保留結果最有利的一組參數。
-- Hsu et al. [S2-5] 明確指出 community parameters 依 target scenario 而定，且其 trace matching 需要調整 attraction 與 pause time。因此 [S2-5] 支持模型結構，不直接提供本研究可照抄的 transition matrix。
-
-### 8.4 Stage 2B data contract additions
-
-Stage 2A 的所有 arrays 繼續保留，另加入：
-
-| Value | Shape | Contract |
-|---|---|---|
-| `mobility_model` | scalar string | `straight` 或 `hotspot_semi_markov`；寫入 config 與每個 result root。 |
-| `hotspot_centers` | `[J,2]` real | 公尺；固定於該 experiment config，全部位於 UE disk 內。 |
-| `hotspot_state` | `[B,T,K]` integer | Dwell 時為所在 hotspot；transit 時為 destination hotspot，並由 phase 明確區分。 |
-| `mobility_phase` | `[B,T,K]` enum | `dwell` 或 `transit`。 |
-| `instantaneous_speeds_mps` | `[B,T,K]` real | 用於位置更新與 time-varying Jakes coefficient。 |
-| `transition_matrix` | config array | 每列總和為 1，元素非負；time-varying 時保存全部 $P^{(q)}$。 |
-| `dwell_durations_s` | per-event array | 保存實際抽樣值，用於 distribution recovery 與 reproducibility。 |
-
-實作時直接擴充 `code/stage2/` 的 mobility generator 與測試，新增 `--mobility_model`；不複製另一套 trainer/model tree。Stage 2B artifacts 使用獨立的 `results_stage2b_*` roots。
-
-### 8.5 Controlled comparison
-
-開發門檻先以同一個 frozen Stage 1B checkpoint 評估 paired straight/hotspot test traces，用來驗證 mobility-model shift 的 evaluation pipeline，不需先重新訓練。若初步 interaction 大到可能改變 downstream 設計，Stage 3 就同時保留 straight/hotspot environments；若不大，Stage 3 先以 straight 開發，hotspot 作 regression test。
-
-方法與介面凍結後，Stage 2B evidence gate 再完成下列 train/test matrix：
-
-| Train mobility | Test: straight | Test: hotspot |
-|---|---|---|
-| Straight | in-distribution baseline | distribution-shift robustness |
-| Hotspot | reverse transfer | hotspot matched training |
-
-- Centralized GNN、decentralized GNN、MRT 與 RZF 使用完全相同的 test traces、mask、true CSI、noise 與 power constraint。
-- 可共用的 initial positions、normalized small-scale innovations 與 random-number streams 按 seed 配對；mobility-specific draws 分開保存。
-- Train/validation/test 必須按 parent long macro trace 分割；同一 long trace 的不同 2 s clips 不得跨 split。
-- Evidence gate 至少使用 10 個獨立 training seeds。這是論文 inference requirement，不是 Stage 3 工程開發的 blocker。五個 non-zero paired observations 的雙尾 exact sign-flip test 最小 $p=0.0625$，不足以在 $\alpha=0.05$ 下拒絕虛無假設。
-- Statistical unit 是 seed-level 或完整 trajectory-level aggregate；同一 trajectory 的 2000 個 temporally correlated frames 不得當作 2000 個獨立樣本。
-- 報告 paired effect、95% CI 與 effect size；多個 method/metric comparisons 使用 Holm correction。Mobility robustness 優先用事前 practical-equivalence margin 判定，不以單一 $p$ value 代替實務差異。
-
-Primary metrics：
-
-1. Long-term average sum rate 與 5th-percentile UE rate。
-2. $\Delta_{\mathrm{interaction}}$ 與四個方法的 ranking stability。
-3. Strongest-AP change count、原 serving set coverage 與 frozen-association regret。
-4. Hotspot occupancy、transition matrix 與 dwell-time distribution recovery。
-5. Dwell/transit 分段的 distance、path loss 與 normalized-channel autocorrelation。
-
-### 8.6 Stage 2B mandatory gates 與 downstream decision
-
-#### Gate 2B.1 — Trace validity
-
-- 固定 seed 可重現全部 hotspot states、dwell events、positions 與 channels；不同 seed 不得意外相同。
-- Empirical transition rows 與 configured $P^{(q)}$ 相容，empirical dwell distribution 通過預先指定的 distribution/quantile tolerance。
-- Long-run hotspot occupancy 與理論或模擬目標 stationary occupancy 相容；若 time-varying，分 $q$ 報告而不假設單一 stationary distribution。
-
-#### Gate 2B.2 — Physical and channel continuity
-
-- 所有 positions 位於 UE disk；每步位移不超過 $v_{k,t}\Delta t+10^{-10}$ m。
-- Hotspot transition 前後沒有 position、distance、path-loss 或 true-channel teleportation。
-- Time-varying normalized-channel correlation 依 instantaneous speed/dwell regime 符合理論與 Stage 2A Gate 2A.3 的 tolerance。
-
-#### Gate 2B.3 — Fixed association and full CSI
-
-- 每個 evaluation clip 的 mask 只在 $t=0$ 建立一次，之後固定。
-- `stored_channels == true_channels`；Stage 2B 不提前加入 stale CSI、dynamic association 或 history observation。
-
-#### Gate 2B.4 — Robustness decision
-
-- 在查看結果前登記 sum-rate、tail-rate 與 C/D-gap 的 practical-equivalence margins。
-- Development gate 只要 frozen-checkpoint straight/hotspot evaluation 能成對完成、metrics finite 且 2B.1–2B.3 通過，即可進入 Stage 3；單一 seed 不作 equivalence 或 significance 主張。
-- 若 $\Delta_{\mathrm{interaction}}$ 的 95% CI 落在等效界線內且方法排名穩定，Stage 2A 保留為主 baseline，Stage 2B 作 robustness evidence。
-- 若 interaction 超出界線、方法排名翻轉或 frozen-association regret 顯著改變，後續 Stage 3–5 必須同時報告 straight-line 與 hotspot results，不得把結論寫成 mobility-model independent。
-- 真正由 UE action/reward 控制 destination 的 MDP 若未來要做，必須另立 joint mobility-control research question，不納入 Stage 2B。
-
-## 9. 論文證據與採用邊界
-
-| Source | 可核對證據 | Stage 2 如何使用／不使用 |
-|---|---|---|
-| [S2-1] Deng et al., 2019 | 使用 first-order stationary Gauss–Markov $\mathbf h_k(t+1)=\rho_k\mathbf h_k(t)+\sqrt{1-\rho_k^2}\mathbf e_k(t)$，並以 Jakes $J_0$ 將 $\rho_k$ 連到速度；simulation 使用 2.6 GHz、1 ms subframe、2000 blocks，例示 20/80 km/h 與 40–80 km/h。 | 作為 core small-scale model、$f_c$、$\Delta t$、episode length 與 high-speed stress prior；不照抄其 single-cell antennas、SNR 或 pilot配置。 |
-| [S2-2] Ammar et al., 2024 | 在 UC CF-MIMO 中使用 Jakes channel aging；UE 以 10 m/s、1 s step 走 1 km straight line；LSF 由距離 path loss 與 spatially correlated shadowing組成。 | 支持 straight-line CF mobility、位置驅動 path loss與 later shadowing sensitivity；其 1 s 是 handoff/LSF timescale，不作本研究 CSI block。 |
-| [S2-3] Ammar et al., 2025 | 明確允許 straight line 或 random waypoint；simulation 使用 10 m/s、5 s decision step，並比較 direction-assisted 與 LSF-history-assisted observations。 | 支持之後 Stage 3/6 的 trajectory/history choices；不在 Stage 2 提前加入 history observation 或 DRL。 |
-| [S2-4] 3GPP TR 38.901 | 列出 3 km/h mobility example、30 km/h fixed-speed/random-direction calibration example，並規範 spatially consistent mobility updates。 | 支持 representative low/urban speeds與位置更新 sanity check；本階段未實作完整 cluster/ray spatial consistency。 |
-| [S2-5] Hsu et al., 2007 | WLAN traces 顯示偏斜的 location preference 與週期性返回；TVC model 以 local/roaming Markov chain、community attraction 與 pause time 建模，並提出可用固定 points of interest 作共同 attraction points。 | 支持 Stage 2B 的 hotspot/Markov 結構；其 campus/corporate trace 與參數不直接視為本 CF-mMIMO geometry 的 ground truth。 |
-| [S2-6] González et al., 2008 | 分析 100,000 名手機使用者六個月資料，觀察到高度時空規律與返回少數高頻位置的傾向。 | 支持將 revisit/frequent-location 納入 robustness；不提供本研究的 transition matrix、dwell 或 wireless-channel parameters。 |
-| [S2-7] Jiang et al., 2016 | TimeGeo 使用 time-inhomogeneous Markov model 與 individual dwell/burst parameters 生成 urban mobility，並區分 temporal destination choice 與 spatial destination selection。 | 支持 Stage 2B 顯式建模 dwell 與較慢 macro timescale；其 10-minute/hundreds-of-meters urban resolution 不套用為 1 ms channel block。 |
+| 5 APs、$K=8$、$M=2$、AP radius 200 m、UE disk radius 100 m、$P_{\max}=15$ dBm | [S2-0, Sec. IV, Table I] | Reference-matched；Stage 2 不在新 topology 上同時測 mobility。 |
+| Direct Rayleigh link 的 $10^{-4.5}d^{-3.5}$ amplitude convention 與 association threshold $0.1$ | [S2-0, Sec. II, Sec. IV, Table I] | Reference-matched；`/1e-7` 與 `noise_power=1e-12` 是 Stage 1 numerical convention，不假裝是 paper parameter。 |
+| $f_c=2.6$ GHz、$\Delta t=1$ ms、2000 blocks | [S2-1, Sec. VI] | 用於 Doppler/channel-update timescale；不將 1 ms 解釋為 handoff decision period。 |
+| First-order stationary Gauss–Markov channel aging | [S2-1, Eqs. (1)–(2)] | 直接支持 AR(1) recursion 與 stationary complex-Gaussian marginal。 |
+| $J_0(2\pi f_D T_s)$ 將 speed/Doppler 連到 temporal correlation | [S2-1]；UC-CF-MIMO 中的 Jakes covariance 可參照 [S2-2, Eqs. (1)–(2)] | 只用 Jakes 的 one-step value 校準 AR(1)；multi-lag target 是 $\rho^\ell$，不是 exact Jakes curve。 |
+| Straight-line constant-speed mobility | [S2-2, Sec. VI] 在 UC-CF-MIMO 使用 36 km/h straight trip；[S2-4, Sec. III-B] 定義 constant-speed random-direction epochs | 支持結構；boundary rejection 是 controlled project choice。 |
+| 0/3/30/80 km/h grid | 0 為 derived anchor；3/30 km/h 可見 [S2-3]；80 km/h 可見 [S2-1] | 是 coverage grid，不代表這四點是單一文獻預設的統一 benchmark。 |
+| Preferred locations、revisit、pause/dwell 的 hotspot structure | Community/Markov/pause structure [S2-4]；recurrent frequent locations [S2-5]；dwell/burst 與 spatial choice 分離 [S2-6] | 支持 synthetic semi-Markov environment 的結構；不支持本計畫的數值即為真實人類 mobility。 |
+| 4 centers at 35 m、radius 10 m、$P_{ii}=0.6$、Gamma shape 2/mean 5 s | 無論文直接校準 | Controlled synthetic main setting；要與 low/high variants 一起做 generator diagnostics，不可以 rate 結果反向選參數。 |
+| 300 s parent trace + natural-time 2 s clips | TimeGeo 支持將 macro mobility timing 與 spatial choice 分開 [S2-6]；300 s 本身無文獻校準 | 300 s 是 inference sampling budget；獨立 long diagnostic stream 才能驗證 transition/dwell tolerance。 |
+| Fixed-$t=0$ association + full current CSI | Threshold rule 來自 [S2-0]；固定 mask/full CSI 為 project control | 用來隔離 dynamic association 與 stale CSI；不是對 real deployment 會永久固定 association 的主張。 |
+| 不加 shadowing | [S2-0] 的 Stage 1 direct-link convention；[S2-2] 顯示 correlated shadowing 是另一個可建模因素 | 為了 backward compatibility 而凍結；對外主張必須承認這是簡化 channel。 |
+
+綜合判定：**Stage 2 作為 environment qualification 與 frozen-model smoke evaluation 是公平且有證據邊界的；作為 speed causality、straight-vs-hotspot robustness 或 realistic-channel evidence 則還不公平，且本計畫已明確將這些主張留到 Stage 7。**
 
 ## References
+
+[S2-0] W.-Y. Ting, R. Y. Chang, F.-T. Chien, T.-Y. Peng, and P.-H. Lin, “Decentralized Graph Neural Network-Based Joint Beamforming in Multi-RIS-Aided Cell-Free Networks,” manuscript. [Local reference PDF](<Decentralized Graph Neural Network-Based Joint Beamforming in Multi-RIS-Aided Cell-Free Networks.pdf>)
 
 [S2-1] R. Deng, Z. Jiang, S. Zhou, and Z. Niu, “Intermittent CSI Update for Massive MIMO Systems With Heterogeneous User Mobility,” *IEEE Transactions on Communications*, vol. 67, no. 7, pp. 4811–4824, Jul. 2019. [DOI](https://doi.org/10.1109/TCOMM.2019.2911575) · [Author manuscript](https://network.ee.tsinghua.edu.cn/niulab/wp-content/uploads/2019/12/Intermittent-CSI-Update-for-Massive-MIMO-Systems-With-Heterogeneous-User-Mobility.pdf)
 
 [S2-2] H. A. Ammar, R. Adve, S. Shahbazpanahi, G. Boudreau, and K. V. Srinivas, “Handoffs in User-Centric Cell-Free MIMO Networks: A POMDP Framework,” *IEEE Transactions on Wireless Communications*, vol. 23, no. 8, pp. 10319–10335, Aug. 2024. [arXiv](https://arxiv.org/abs/2403.08900)
 
-[S2-3] H. A. Ammar, R. Adve, S. Shahbazpanahi, G. Boudreau, and I. Bahceci, “Handoff Design in User-Centric Cell-Free Massive MIMO Networks Using DRL,” *IEEE Transactions on Communications*, vol. 73, no. 11, pp. 11368–11384, Nov. 2025. [arXiv](https://arxiv.org/abs/2507.20966)
+[S2-3] 3GPP, “Study on Channel Model for Frequencies from 0.5 to 100 GHz,” TR 38.901, version 19.3.0, Release 19, Apr. 2026. [ETSI PDF](https://www.etsi.org/deliver/etsi_tr/138900_138999/138901/19.03.00_60/tr_138901v190300p.pdf)
 
-[S2-4] 3GPP, “Study on Channel Model for Frequencies from 0.5 to 100 GHz,” TR 38.901, Release 18, v18.1.0, Feb. 2026. [ETSI PDF](https://www.etsi.org/deliver/etsi_tr/138900_138999/138901/18.01.00_60/tr_138901v180100p.pdf)
+[S2-4] W.-J. Hsu, T. Spyropoulos, K. Psounis, and A. Helmy, “Modeling Time-Variant User Mobility in Wireless Mobile Networks,” in *Proc. IEEE INFOCOM*, pp. 758–766, May 2007. [DOI](https://doi.org/10.1109/INFCOM.2007.94) · [Author manuscript](https://bpb-us-w1.wpmucdn.com/sites.usc.edu/dist/b/364/files/2019/05/EE650_hsutimevariant.pdf)
 
-[S2-5] W.-J. Hsu, T. Spyropoulos, K. Psounis, and A. Helmy, “Modeling Time-Variant User Mobility in Wireless Mobile Networks,” in *Proc. IEEE INFOCOM*, pp. 758–766, May 2007. [DOI](https://doi.org/10.1109/INFCOM.2007.94) · [Author manuscript](https://www.cise.ufl.edu/~helmy/papers/TVC-Infocom-07-published.pdf)
+[S2-5] M. C. González, C. A. Hidalgo, and A.-L. Barabási, “Understanding Individual Human Mobility Patterns,” *Nature*, vol. 453, pp. 779–782, Jun. 2008. [DOI](https://doi.org/10.1038/nature06958)
 
-[S2-6] M. C. González, C. A. Hidalgo, and A.-L. Barabási, “Understanding Individual Human Mobility Patterns,” *Nature*, vol. 453, pp. 779–782, Jun. 2008. [DOI](https://doi.org/10.1038/nature06958)
-
-[S2-7] S. Jiang, Y. Yang, S. Gupta, D. Veneziano, S. Athavale, and M. C. González, “The TimeGeo Modeling Framework for Urban Mobility Without Travel Surveys,” *Proceedings of the National Academy of Sciences*, vol. 113, no. 37, pp. E5370–E5378, Sep. 2016. [DOI](https://doi.org/10.1073/pnas.1524261113) · [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC5027456/)
+[S2-6] S. Jiang, Y. Yang, S. Gupta, D. Veneziano, S. Athavale, and M. C. González, “The TimeGeo Modeling Framework for Urban Mobility Without Travel Surveys,” *Proceedings of the National Academy of Sciences*, vol. 113, no. 37, pp. E5370–E5378, Sep. 2016. [DOI](https://doi.org/10.1073/pnas.1524261113) · [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC5027456/)
