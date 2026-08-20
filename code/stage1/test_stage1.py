@@ -3,6 +3,7 @@ import torch
 
 from data import MyDataLoader
 from model_2 import node_update
+from trainer_2 import Trainer, seed_everything
 from utils_return_indivial_rates import mrt_beamforming, rzf_beamforming
 
 
@@ -12,6 +13,12 @@ NUM_ANTENNAS = 2
 NUM_USERS = 3
 PMAX = 10 ** ((15 - 30) / 10)
 DEVICE = torch.device("cpu")
+EXPECTED_EVAL_METRICS = {
+    "centralized_gnn": 1.778290867805481,
+    "decentralized_gnn": 1.8409016728401184,
+    "mrt": 7.94613242149353,
+    "rzf": 7.84561014175415,
+}
 
 
 def build_snapshot(seed):
@@ -78,6 +85,23 @@ def assert_mask_and_power(beamformer, association_mask):
         assert torch.all(power <= PMAX + 1e-6)
 
 
+def assert_evaluator_contract():
+    seed_everything(17)
+    trainer = Trainer(
+        M=NUM_ANTENNAS,
+        K=NUM_USERS,
+        batch_size=BATCH_SIZE,
+        n_iter=1,
+        pmax_dbm=15,
+        noise_power=1e-12,
+        device="cpu",
+    )
+    metrics = trainer.eval(4)
+    assert metrics.keys() == EXPECTED_EVAL_METRICS.keys()
+    for method, expected in EXPECTED_EVAL_METRICS.items():
+        assert np.isclose(metrics[method], expected, atol=1e-6, rtol=0)
+
+
 def main():
     first = build_snapshot(0)
     expected_w_shape = (
@@ -132,6 +156,9 @@ def main():
             atol=1e-6,
             rtol=0,
         )
+
+    assert_evaluator_contract()
+    print("Stage 1 snapshot and evaluator checks passed.")
 
 
 if __name__ == "__main__":
