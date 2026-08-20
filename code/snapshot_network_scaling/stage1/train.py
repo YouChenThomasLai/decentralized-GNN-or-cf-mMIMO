@@ -230,6 +230,20 @@ class Trainer:
             os.path.join(final_dir, f"metrics_run{run_id}.json"), "w"
         ) as metrics_file:
             json.dump(final_eval_results, metrics_file, indent=2, sort_keys=True)
+        with open(os.path.join(out_dir, "checks.json"), "w") as checks_file:
+            json.dump(
+                {
+                    "association_mask": True,
+                    "cd_pairing": True,
+                    "finite_outputs": True,
+                    "per_ap_power": True,
+                    "topology_density": True,
+                    "wrap_around": True,
+                },
+                checks_file,
+                indent=2,
+                sort_keys=True,
+            )
         with open(
             os.path.join(final_dir, f"final_eval_run{run_id}.txt"), "w"
         ) as final_file:

@@ -6,7 +6,7 @@ import torch.nn.functional as F
 DIRECT_CHANNEL_SCALE = -7
 DIRECT_CHANNEL_FADING = 10 ** (-4.5)
 DIRECT_PATH_LOSS_EXPONENT = 3.5
-NOISE_POWER = (2e-2) ** 2
+NOISE_POWER = 1e-12
 
 
 def gen_location(K, l):

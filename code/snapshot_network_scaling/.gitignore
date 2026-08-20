@@ -1,0 +1,17 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Experiment artifacts
+results*/
+past*/
+*.npy
+*.pt
+events.out.tfevents.*
+*.xlsx
+grouped_plot*
+*_ppt_assets/
+*.log
+*.status
+
+instability-checker/

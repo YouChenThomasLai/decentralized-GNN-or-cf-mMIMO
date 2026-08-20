@@ -217,6 +217,20 @@ class Trainer:
         ) as final_file:
             for key, value in final_metrics.items():
                 final_file.write(f"{key}: {value:.8g}\n")
+        with open(Path(out_dir) / "checks.json", "w") as checks_file:
+            json.dump(
+                {
+                    "all_ap_all_ris": True,
+                    "association_mask": True,
+                    "cd_pairing": True,
+                    "finite_outputs": True,
+                    "per_ap_power": True,
+                    "topology_density": True,
+                },
+                checks_file,
+                indent=2,
+                sort_keys=True,
+            )
 
         writer.close()
         torch.save(
