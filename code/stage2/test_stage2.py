@@ -2,7 +2,12 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from data import MyDataLoader
+from data import (
+    MOBILITY_HOTSPOT,
+    MOBILITY_PHASE_DWELL,
+    MOBILITY_PHASE_TRANSIT,
+    MyDataLoader,
+)
 from model_2 import node_update
 from utils_return_indivial_rates import (
     DIRECT_CHANNEL_FADING,
@@ -33,6 +38,30 @@ def build_loader(seed, speed_kmh=30, batch_size=BATCH_SIZE, steps=EPISODE_STEPS)
         speed_kmh=speed_kmh,
         seed=seed,
     ).generate_trajectories(NUM_USERS, 0.1)
+
+
+def build_hotspot_loader(seed):
+    transition_matrix = np.full((3, 3), 0.25)
+    np.fill_diagonal(transition_matrix, 0.5)
+    return MyDataLoader(
+        NUM_ANTENNAS,
+        16,
+        episode_steps=200,
+        speed_kmh=36,
+        decision_period_s=0.001,
+        seed=seed,
+        mobility_model=MOBILITY_HOTSPOT,
+        hotspot_centers=np.asarray(((-5, 0), (5, 0), (0, 5))),
+        hotspot_radius_m=1,
+        transition_matrix=transition_matrix,
+        dwell_mean_s=0.5,
+        dwell_shape=2,
+        hotspot_trace_duration_s=40,
+    ).generate_trajectories(
+        NUM_USERS,
+        0.1,
+        initial_positions=np.zeros((NUM_USERS, 2)),
+    )
 
 
 def assert_mask_and_power(beamformer, association_mask):
@@ -290,12 +319,105 @@ def assert_channel_statistics():
     assert np.all(np.isfinite(loader.true_channels))
 
 
+def assert_hotspot_contract_and_dynamics():
+    loader = build_hotspot_loader(31)
+    assert loader.mobility_model == MOBILITY_HOTSPOT
+    assert loader.hotspot_centers.shape == (3, 2)
+    assert loader.hotspot_state.shape == (16, 200, NUM_USERS)
+    assert loader.mobility_phase.shape == (16, 200, NUM_USERS)
+    assert loader.instantaneous_speeds_mps.shape == (16, 200, NUM_USERS)
+    assert set(np.unique(loader.mobility_phase)) == {
+        MOBILITY_PHASE_DWELL,
+        MOBILITY_PHASE_TRANSIT,
+    }
+    assert np.all((loader.hotspot_state >= 0) & (loader.hotspot_state < 3))
+    assert np.array_equal(loader.true_channels, loader.stored_channels)
+    assert np.allclose(loader.transition_matrix.sum(axis=1), 1)
+
+    step_distances = np.linalg.norm(np.diff(loader.ue_positions, axis=1), axis=-1)
+    step_limits = (
+        loader.instantaneous_speeds_mps[:, :-1]
+        * loader.decision_period_s
+    )
+    assert np.all(step_distances <= step_limits + 1e-10)
+    assert np.max(loader.instantaneous_speeds_mps) <= 10 + 1e-10
+    assert np.max(np.linalg.norm(loader.ue_positions, axis=-1)) <= 100 + 1e-12
+    assert np.allclose(
+        loader.rhos,
+        jakes_correlation(loader.instantaneous_speeds_mps),
+    )
+
+    diagnostics = loader.hotspot_diagnostics()
+    assert np.all(diagnostics["transition_counts"].sum(axis=1) > 0)
+    assert np.nanmax(
+        np.abs(
+            diagnostics["empirical_transition_matrix"]
+            - diagnostics["configured_transition_matrix"]
+        )
+    ) < 0.15
+    assert abs(float(diagnostics["dwell_mean_s"]) - 0.5) < 0.08
+    assert np.max(
+        np.abs(
+            diagnostics["clip_hotspot_occupancy"]
+            - diagnostics["stationary_occupancy_target"]
+        )
+    ) < 0.2
+    assert diagnostics["strongest_ap_change_count"].shape == (
+        16,
+        NUM_USERS,
+    )
+    assert diagnostics["fixed_serving_set_coverage"].shape == (
+        16,
+        NUM_USERS,
+    )
+    assert np.all(
+        (diagnostics["fixed_serving_set_coverage"] >= 0)
+        & (diagnostics["fixed_serving_set_coverage"] <= 1)
+    )
+    assert np.allclose(
+        diagnostics["empirical_lag1_by_phase"],
+        diagnostics["theoretical_lag1_by_phase"],
+        atol=0.03,
+    )
+
+    channel_diagnostics = loader.diagnostics(
+        lags=(1, 2, 5), bootstrap_samples=100
+    )
+    assert np.max(
+        np.abs(
+            channel_diagnostics["empirical_correlation"]
+            - channel_diagnostics["theoretical_correlation"]
+        )
+    ) < 0.03
+
+
+def assert_hotspot_reproducibility():
+    first = build_hotspot_loader(41)
+    second = build_hotspot_loader(41)
+    different = build_hotspot_loader(42)
+    for name in (
+        "ue_positions",
+        "hotspot_state",
+        "mobility_phase",
+        "instantaneous_speeds_mps",
+        "dwell_durations_s",
+        "transition_from_states",
+        "transition_to_states",
+        "true_channels",
+    ):
+        assert np.array_equal(getattr(first, name), getattr(second, name))
+    assert not np.array_equal(first.hotspot_state, different.hotspot_state)
+    assert not np.array_equal(first.true_channels, different.true_channels)
+
+
 def main():
     assert_data_contract_and_dynamics()
     assert_reproducibility_and_stationarity()
     assert_stage1_t0_compatibility()
     assert_beamforming_contract()
     assert_channel_statistics()
+    assert_hotspot_contract_and_dynamics()
+    assert_hotspot_reproducibility()
     print("Stage 2 mobility checks passed.")
 
 

@@ -11,7 +11,13 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from data import MyDataLoader
+from data import (
+    DEFAULT_HOTSPOT_CENTERS,
+    MOBILITY_HOTSPOT,
+    MOBILITY_PHASE_LABELS,
+    MOBILITY_STRAIGHT,
+    MyDataLoader,
+)
 from model_2 import node_update
 from utils_return_indivial_rates import (
     DIRECT_CHANNEL_FADING,
@@ -29,6 +35,7 @@ SUMMARY_METRICS = tuple(
     for method in METHODS
     for metric in (method, f"{method}_p05_user_rate")
 )
+HOTSPOT_STICKINESS = {"low": 0.2, "medium": 0.6, "high": 0.9}
 
 
 def seed_everything(seed):
@@ -82,9 +89,17 @@ class Trainer:
         validation_trajectories=8,
         test_trajectories=40,
         eval_frame_batch_size=32,
+        eval_time_stride=1,
         bootstrap_samples=500,
         seed=0,
         device="cuda:0",
+        mobility_model=MOBILITY_STRAIGHT,
+        hotspot_centers=None,
+        hotspot_radius_m=10.0,
+        transition_matrix=None,
+        dwell_mean_s=5.0,
+        dwell_shape=2.0,
+        hotspot_trace_duration_s=300.0,
     ):
         self.M = M
         self.K = K
@@ -96,6 +111,7 @@ class Trainer:
         self.num_of_AP = 5
         self.episode_steps = episode_steps
         self.eval_frame_batch_size = eval_frame_batch_size
+        self.eval_time_stride = eval_time_stride
         self.bootstrap_samples = bootstrap_samples
         self.seed = seed
         self.train_trajectory_count = (
@@ -109,6 +125,13 @@ class Trainer:
             speed_kmh,
             decision_period_s,
             carrier_frequency_hz,
+            mobility_model,
+            hotspot_centers,
+            hotspot_radius_m,
+            transition_matrix,
+            dwell_mean_s,
+            dwell_shape,
+            hotspot_trace_duration_s,
         )
         self.train_data = self._make_loader(
             self.train_trajectory_count, seed, loader_args
@@ -147,7 +170,20 @@ class Trainer:
 
     @staticmethod
     def _make_loader(trajectory_count, seed, loader_args):
-        M, episode_steps, speed_kmh, period_s, carrier_hz = loader_args
+        (
+            M,
+            episode_steps,
+            speed_kmh,
+            period_s,
+            carrier_hz,
+            mobility_model,
+            hotspot_centers,
+            hotspot_radius_m,
+            transition_matrix,
+            dwell_mean_s,
+            dwell_shape,
+            hotspot_trace_duration_s,
+        ) = loader_args
         return MyDataLoader(
             M,
             trajectory_count,
@@ -156,6 +192,13 @@ class Trainer:
             period_s,
             carrier_hz,
             seed=seed,
+            mobility_model=mobility_model,
+            hotspot_centers=hotspot_centers,
+            hotspot_radius_m=hotspot_radius_m,
+            transition_matrix=transition_matrix,
+            dwell_mean_s=dwell_mean_s,
+            dwell_shape=dwell_shape,
+            hotspot_trace_duration_s=hotspot_trace_duration_s,
         )
 
     def train_batch(self):
@@ -240,18 +283,69 @@ class Trainer:
             ):
                 metrics, _ = self.eval(self.validation_data)
                 for metric, value in metrics.items():
-                    validation[metric].append(value)
+                    validation.setdefault(metric, []).append(value)
                     writer.add_scalar(f"Val/{metric}", value, iteration + 1)
                     print(
                         f"[Val {metric} | {iteration + 1}/{self.n_iter}] "
                         f"value = {value:.8g}"
                     )
 
+        checkpoint_path = os.path.join(
+            model_dir, f"model_final_run{run_id}.pt"
+        )
+        torch.save(self.model.state_dict(), checkpoint_path)
+        print(
+            "[INFO] Saved trained checkpoint before final eval: "
+            f"{checkpoint_path}"
+        )
+
         print("Running FINAL trajectory evaluation...")
         final_metrics, raw_metrics = self.eval(self.test_data)
         for metric, value in final_metrics.items():
             print(f"[Final Eval] {metric} = {value:.8g}")
+        final_metrics = self._save_final_evaluation(
+            run_id, out_dir, final_metrics, raw_metrics
+        )
 
+        writer.close()
+        np.save(
+            os.path.join(array_dir, f"losses_run{run_id}.npy"),
+            np.asarray(train_losses),
+        )
+        np.save(
+            os.path.join(array_dir, f"sumrates_run{run_id}.npy"),
+            np.asarray(sum_rates),
+        )
+        np.save(
+            os.path.join(array_dir, f"train_total_run{run_id}.npy"),
+            np.asarray(train_total),
+        )
+        for metric, values in validation.items():
+            np.save(
+                os.path.join(array_dir, f"val_{metric}_run{run_id}.npy"),
+                np.asarray(values),
+            )
+        return final_metrics
+
+    def evaluate_checkpoint(self, run_id, out_dir, checkpoint_path, config):
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, "config.json"), "w") as config_file:
+            json.dump(config, config_file, indent=2, sort_keys=True)
+
+        state_dict = torch.load(checkpoint_path, map_location=self.device)
+        self.model.load_state_dict(state_dict)
+        print(f"[INFO] Loaded frozen checkpoint: {checkpoint_path}")
+        print("Running checkpoint-only FINAL trajectory evaluation...")
+        final_metrics, raw_metrics = self.eval(self.test_data)
+        for metric, value in final_metrics.items():
+            print(f"[Final Eval] {metric} = {value:.8g}")
+        return self._save_final_evaluation(
+            run_id, out_dir, final_metrics, raw_metrics
+        )
+
+    def _save_final_evaluation(
+        self, run_id, out_dir, final_metrics, raw_metrics
+    ):
         final_metrics["centralized_minus_decentralized"] = (
             final_metrics["centralized_gnn"]
             - final_metrics["decentralized_gnn"]
@@ -272,42 +366,61 @@ class Trainer:
             **raw_metrics,
         )
         self._save_environment_artifacts(final_dir, run_id)
-
-        writer.close()
-        torch.save(
-            self.model.state_dict(),
-            os.path.join(model_dir, f"model_final_run{run_id}.pt"),
-        )
-        np.save(
-            os.path.join(array_dir, f"losses_run{run_id}.npy"),
-            np.asarray(train_losses),
-        )
-        np.save(
-            os.path.join(array_dir, f"sumrates_run{run_id}.npy"),
-            np.asarray(sum_rates),
-        )
-        np.save(
-            os.path.join(array_dir, f"train_total_run{run_id}.npy"),
-            np.asarray(train_total),
-        )
-        for metric, values in validation.items():
-            np.save(
-                os.path.join(array_dir, f"val_{metric}_run{run_id}.npy"),
-                np.asarray(values),
-            )
         return final_metrics
+
+    def _beamformers(
+        self,
+        channels,
+        association_mask,
+        centralized_feature,
+        centralized_index,
+        decentralized_feature,
+        decentralized_index,
+    ):
+        return {
+            "centralized_gnn": self.model(
+                centralized_feature,
+                centralized_index,
+                training=True,
+                duplicate=False,
+            ),
+            "decentralized_gnn": self.model(
+                decentralized_feature,
+                decentralized_index,
+                training=False,
+                duplicate=False,
+            ),
+            "mrt": mrt_beamforming(
+                channels,
+                association_mask,
+                self.pmax_w,
+                self.device,
+            ),
+            "rzf": rzf_beamforming(
+                channels,
+                association_mask,
+                self.pmax_w,
+                self.device,
+                self.noise_power,
+            ),
+        }
 
     def eval(self, loader):
         self.model.eval()
         trajectory_count = loader.batch_size
+        evaluation_time_indices = np.arange(
+            0, self.episode_steps, self.eval_time_stride
+        )
         trajectory_indices = np.repeat(
-            np.arange(trajectory_count), self.episode_steps
+            np.arange(trajectory_count), evaluation_time_indices.size
         )
-        time_indices = np.tile(
-            np.arange(self.episode_steps), trajectory_count
-        )
+        time_indices = np.tile(evaluation_time_indices, trajectory_count)
         frame_count = trajectory_indices.size
         period_user_rates = {
+            method: np.empty((frame_count, self.K), dtype=np.float64)
+            for method in METHODS
+        }
+        dynamic_period_user_rates = {
             method: np.empty((frame_count, self.K), dtype=np.float64)
             for method in METHODS
         }
@@ -333,33 +446,14 @@ class Trainer:
                 )
                 association_mask = loader.association_mask[trajectory_batch]
 
-                beamformers = {
-                    "centralized_gnn": self.model(
-                        centralized_feature,
-                        centralized_index,
-                        training=True,
-                        duplicate=False,
-                    ),
-                    "decentralized_gnn": self.model(
-                        decentralized_feature,
-                        decentralized_index,
-                        training=False,
-                        duplicate=False,
-                    ),
-                    "mrt": mrt_beamforming(
-                        channels,
-                        association_mask,
-                        self.pmax_w,
-                        self.device,
-                    ),
-                    "rzf": rzf_beamforming(
-                        channels,
-                        association_mask,
-                        self.pmax_w,
-                        self.device,
-                        self.noise_power,
-                    ),
-                }
+                beamformers = self._beamformers(
+                    channels,
+                    association_mask,
+                    centralized_feature,
+                    centralized_index,
+                    decentralized_feature,
+                    decentralized_index,
+                )
                 for method, weights in beamformers.items():
                     rates = calculate_rates(
                         weights,
@@ -372,11 +466,49 @@ class Trainer:
                         rates.detach().cpu().numpy()
                     )
 
+                dynamic_mask = loader.get_current_association_mask(
+                    trajectory_batch,
+                    time_batch,
+                    self.associate_threshold,
+                )
+                (
+                    dynamic_centralized_feature,
+                    dynamic_centralized_index,
+                    dynamic_decentralized_feature,
+                    dynamic_decentralized_index,
+                ) = loader.get_frames(
+                    trajectory_batch,
+                    time_batch,
+                    dynamic_mask,
+                )
+                dynamic_beamformers = self._beamformers(
+                    channels,
+                    dynamic_mask,
+                    dynamic_centralized_feature.to(self.device),
+                    dynamic_centralized_index,
+                    [
+                        feature.to(self.device)
+                        for feature in dynamic_decentralized_feature
+                    ],
+                    dynamic_decentralized_index,
+                )
+                for method, weights in dynamic_beamformers.items():
+                    rates = calculate_rates(
+                        weights,
+                        channels,
+                        self.num_of_AP,
+                        self.device,
+                        self.noise_power,
+                    )
+                    dynamic_period_user_rates[method][start:stop] = (
+                        rates.detach().cpu().numpy()
+                    )
+
         metrics = {}
         raw_metrics = {}
         for method, rates in period_user_rates.items():
             rates = rates.reshape(
-                trajectory_count, self.episode_steps, self.K
+                trajectory_count, evaluation_time_indices.size, self.K
             )
             per_trajectory_sum_rate = rates.sum(axis=2).mean(axis=1)
             per_trajectory_user_rates = rates.mean(axis=1)
@@ -394,22 +526,87 @@ class Trainer:
             raw_metrics[f"{method}_per_trajectory_p05_user_rate"] = (
                 per_trajectory_p05
             )
+            dynamic_rates = dynamic_period_user_rates[method].reshape(
+                trajectory_count,
+                evaluation_time_indices.size,
+                self.K,
+            )
+            dynamic_sum_rate = dynamic_rates.sum(axis=2).mean(axis=1)
+            regret = dynamic_sum_rate - per_trajectory_sum_rate
+            metrics[f"{method}_fixed_association_regret"] = float(
+                regret.mean()
+            )
+            raw_metrics[f"{method}_dynamic_period_user_rates"] = (
+                dynamic_rates
+            )
+            raw_metrics[
+                f"{method}_per_trajectory_fixed_association_regret"
+            ] = regret
+        raw_metrics["evaluation_time_indices"] = evaluation_time_indices
         return metrics, raw_metrics
 
     def _save_environment_artifacts(self, final_dir, run_id):
         loader = self.test_data
-        np.savez(
-            os.path.join(final_dir, f"environment_run{run_id}.npz"),
-            ue_positions=loader.ue_positions,
-            ue_speeds_mps=loader.ue_speeds_mps,
-            ue_directions_rad=loader.ue_directions_rad,
-            distances=loader.distances,
-            path_loss_factors=loader.path_loss_factors,
-            association_mask=loader.association_mask,
-            rhos=loader.rhos,
-            true_stored_max_abs_error=np.max(
+        rssi = np.sum(np.abs(loader.true_channels) ** 2, axis=-1)
+        strongest_ap = np.argmax(rssi, axis=2)
+        expanded_fixed_mask = np.broadcast_to(
+            loader.association_mask[:, None],
+            (*strongest_ap.shape, len(loader.BS_array)),
+        )
+        strongest_ap_covered = np.take_along_axis(
+            expanded_fixed_mask, strongest_ap[..., None], axis=-1
+        )[..., 0]
+        environment = {
+            "mobility_model": np.asarray(loader.mobility_model),
+            "ue_positions": loader.ue_positions,
+            "ue_speeds_mps": loader.ue_speeds_mps,
+            "ue_directions_rad": loader.ue_directions_rad,
+            "instantaneous_speeds_mps": loader.instantaneous_speeds_mps,
+            "distances": loader.distances,
+            "path_loss_factors": loader.path_loss_factors,
+            "association_mask": loader.association_mask,
+            "strongest_ap_change_count": np.sum(
+                strongest_ap[:, 1:] != strongest_ap[:, :-1], axis=1
+            ),
+            "fixed_serving_set_coverage": strongest_ap_covered.mean(
+                axis=1
+            ),
+            "rhos": loader.rhos,
+            "true_stored_max_abs_error": np.max(
                 np.abs(loader.true_channels - loader.stored_channels)
             ),
+        }
+        if loader.mobility_model == MOBILITY_HOTSPOT:
+            environment.update(
+                {
+                    "hotspot_centers": loader.hotspot_centers,
+                    "hotspot_radius_m": loader.hotspot_radius_m,
+                    "hotspot_state": loader.hotspot_state,
+                    "mobility_phase": loader.mobility_phase,
+                    "mobility_phase_labels": MOBILITY_PHASE_LABELS,
+                    "transition_matrix": loader.transition_matrix,
+                    "parent_trace_ids": loader.parent_trace_ids,
+                    "clip_start_times_s": loader.clip_start_times_s,
+                    "dwell_durations_s": loader.dwell_durations_s,
+                    "dwell_trajectory_indices": (
+                        loader.dwell_trajectory_indices
+                    ),
+                    "dwell_user_indices": loader.dwell_user_indices,
+                    "dwell_hotspot_states": loader.dwell_hotspot_states,
+                    "dwell_start_times_s": loader.dwell_start_times_s,
+                    "transition_trajectory_indices": (
+                        loader.transition_trajectory_indices
+                    ),
+                    "transition_user_indices": (
+                        loader.transition_user_indices
+                    ),
+                    "transition_from_states": loader.transition_from_states,
+                    "transition_to_states": loader.transition_to_states,
+                }
+            )
+        np.savez(
+            os.path.join(final_dir, f"environment_run{run_id}.npz"),
+            **environment,
         )
         diagnostics = loader.diagnostics(
             bootstrap_samples=self.bootstrap_samples
@@ -418,10 +615,17 @@ class Trainer:
             os.path.join(final_dir, f"channel_diagnostics_run{run_id}.npz"),
             **diagnostics,
         )
+        if loader.mobility_model == MOBILITY_HOTSPOT:
+            np.savez(
+                os.path.join(
+                    final_dir, f"hotspot_diagnostics_run{run_id}.npz"
+                ),
+                **loader.hotspot_diagnostics(),
+            )
 
 
 def save_summary(exp_dir, seeds, run_results):
-    keys = (*SUMMARY_METRICS, "centralized_minus_decentralized")
+    keys = tuple(run_results[0])
     summary = {}
     for key in keys:
         values = np.asarray([result[key] for result in run_results])
@@ -464,6 +668,11 @@ def main():
     parser.add_argument("--n_iter", type=int, default=2000)
     parser.add_argument("--noise_power", type=float, default=1e-12)
     parser.add_argument("--speed_kmh", type=float, default=0.0)
+    parser.add_argument(
+        "--mobility_model",
+        choices=(MOBILITY_STRAIGHT, MOBILITY_HOTSPOT),
+        default=MOBILITY_STRAIGHT,
+    )
     parser.add_argument("--decision_period_s", type=float, default=0.001)
     parser.add_argument("--carrier_frequency_hz", type=float, default=2.6e9)
     parser.add_argument("--episode_steps", type=int, default=2000)
@@ -471,11 +680,43 @@ def main():
     parser.add_argument("--test_sample_val", type=int, default=8)
     parser.add_argument("--test_sample_final", type=int, default=40)
     parser.add_argument("--eval_frame_batch_size", type=int, default=32)
+    parser.add_argument("--eval_time_stride", type=int, default=1)
     parser.add_argument("--bootstrap_samples", type=int, default=500)
+    parser.add_argument(
+        "--hotspot_centers",
+        default=json.dumps(DEFAULT_HOTSPOT_CENTERS.tolist()),
+        help="JSON array with shape [J,2]",
+    )
+    parser.add_argument("--hotspot_radius_m", type=float, default=10.0)
+    parser.add_argument(
+        "--hotspot_stickiness",
+        choices=tuple(HOTSPOT_STICKINESS),
+        default="medium",
+    )
+    parser.add_argument(
+        "--hotspot_transition_matrix",
+        help="Optional JSON row-stochastic matrix; overrides stickiness",
+    )
+    parser.add_argument("--hotspot_dwell_mean_s", type=float, default=5.0)
+    parser.add_argument("--hotspot_dwell_shape", type=float, default=2.0)
+    parser.add_argument(
+        "--hotspot_trace_duration_s", type=float, default=300.0
+    )
     parser.add_argument("--bs_file", type=str, default="BS_{i}.txt")
-    parser.add_argument("--out_dir", type=str, default="results_stage2")
+    parser.add_argument("--out_dir", type=str)
     parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        help="Frozen model state_dict to evaluate without training",
+    )
     args = parser.parse_args()
+    if args.out_dir is None:
+        args.out_dir = (
+            "results_stage2b_hotspot"
+            if args.mobility_model == MOBILITY_HOTSPOT
+            else "results_stage2"
+        )
 
     checks = {
         "--M": args.M,
@@ -487,6 +728,7 @@ def main():
         "--test_sample_val": args.test_sample_val,
         "--test_sample_final": args.test_sample_final,
         "--eval_frame_batch_size": args.eval_frame_batch_size,
+        "--eval_time_stride": args.eval_time_stride,
         "--bootstrap_samples": args.bootstrap_samples,
     }
     if args.train_trajectories is not None:
@@ -502,10 +744,44 @@ def main():
         parser.error("--speed_kmh cannot be negative")
     if args.decision_period_s <= 0 or args.carrier_frequency_hz <= 0:
         parser.error("Channel timing and carrier frequency must be positive")
+    hotspot_centers = None
+    transition_matrix = None
+    if args.mobility_model == MOBILITY_HOTSPOT:
+        try:
+            hotspot_centers = np.asarray(
+                json.loads(args.hotspot_centers), dtype=np.float64
+            )
+            if args.hotspot_transition_matrix:
+                transition_matrix = np.asarray(
+                    json.loads(args.hotspot_transition_matrix),
+                    dtype=np.float64,
+                )
+            else:
+                hotspot_count = len(hotspot_centers)
+                stickiness = HOTSPOT_STICKINESS[args.hotspot_stickiness]
+                if hotspot_count == 1:
+                    transition_matrix = np.ones((1, 1))
+                else:
+                    transition_matrix = np.full(
+                        (hotspot_count, hotspot_count),
+                        (1 - stickiness) / (hotspot_count - 1),
+                    )
+                    np.fill_diagonal(transition_matrix, stickiness)
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            parser.error(f"Invalid hotspot JSON: {error}")
+    checkpoint_path = None
+    if args.checkpoint:
+        checkpoint_path = Path(args.checkpoint).expanduser().resolve()
+        if not checkpoint_path.is_file():
+            parser.error(f"--checkpoint does not exist: {checkpoint_path}")
 
     speed_label = f"{args.speed_kmh:g}".replace(".", "p")
+    mobility_prefix = (
+        "hotspot_" if args.mobility_model == MOBILITY_HOTSPOT else ""
+    )
     exp_name = (
-        f"speed{speed_label}_M{args.M}_K{args.K}_P{args.pmax_dbm:g}"
+        f"{mobility_prefix}speed{speed_label}_M{args.M}_K{args.K}_"
+        f"P{args.pmax_dbm:g}"
     )
     exp_dir = os.path.join(args.out_dir, exp_name)
     effective_seeds = []
@@ -532,9 +808,17 @@ def main():
             args.test_sample_val,
             args.test_sample_final,
             args.eval_frame_batch_size,
+            args.eval_time_stride,
             args.bootstrap_samples,
             effective_seed,
             args.device,
+            args.mobility_model,
+            hotspot_centers,
+            args.hotspot_radius_m,
+            transition_matrix,
+            args.hotspot_dwell_mean_s,
+            args.hotspot_dwell_shape,
+            args.hotspot_trace_duration_s,
         )
         array_dir = os.path.join(base_dir, "arrays")
         os.makedirs(array_dir, exist_ok=True)
@@ -545,12 +829,45 @@ def main():
         )
 
         config = {
+            "execution_mode": (
+                "frozen_checkpoint_evaluation"
+                if checkpoint_path
+                else "matched_training"
+            ),
             "effective_seed": effective_seed,
+            "mobility_model": args.mobility_model,
+            "hotspot_config": (
+                {
+                    "centers": trainer.test_data.hotspot_centers.tolist(),
+                    "radius_m": trainer.test_data.hotspot_radius_m,
+                    "transition_matrix": (
+                        trainer.test_data.transition_matrix.tolist()
+                    ),
+                    "stickiness_preset": (
+                        None
+                        if args.hotspot_transition_matrix
+                        else args.hotspot_stickiness
+                    ),
+                    "dwell_distribution": "Gamma(shape, mean / shape)",
+                    "dwell_mean_s": trainer.test_data.dwell_mean_s,
+                    "dwell_shape": trainer.test_data.dwell_shape,
+                    "long_macro_trace_duration_s": (
+                        trainer.test_data.hotspot_trace_duration_s
+                    ),
+                    "clip_sampling": "uniform start time",
+                }
+                if args.mobility_model == MOBILITY_HOTSPOT
+                else None
+            ),
             "cli": vars(args),
             "effective_device": str(trainer.device),
             "num_ap": trainer.num_of_AP,
             "association_threshold": trainer.associate_threshold,
             "association_policy": "instantaneous RSSI at t=0, then fixed",
+            "fixed_association_regret": (
+                "current-RSSI reassociation sum rate minus fixed-association "
+                "sum rate, evaluated on identical frames"
+            ),
             "csi_policy": "all stored CSI equals current true CSI",
             "trajectory_split_seeds": {
                 "train": effective_seed,
@@ -564,10 +881,30 @@ def main():
             "direct_channel_scale_exponent": DIRECT_CHANNEL_SCALE,
             "noise_power": args.noise_power,
             "rzf_regularization": "alpha = K_a * noise_power / Pmax",
-            "optimizer": "Adam(lr=0.0001, weight_decay=1e-6)",
+            "optimizer": (
+                None
+                if checkpoint_path
+                else "Adam(lr=0.0001, weight_decay=1e-6)"
+            ),
+            "checkpoint": (
+                {
+                    "path": str(checkpoint_path),
+                    "sha256": hashlib.sha256(
+                        checkpoint_path.read_bytes()
+                    ).hexdigest(),
+                }
+                if checkpoint_path
+                else None
+            ),
             "source_sha256": source_checksums(),
         }
-        run_results.append(trainer.train(run_id, base_dir, log_dir, config))
+        if checkpoint_path:
+            result = trainer.evaluate_checkpoint(
+                run_id, base_dir, checkpoint_path, config
+            )
+        else:
+            result = trainer.train(run_id, base_dir, log_dir, config)
+        run_results.append(result)
         effective_seeds.append(effective_seed)
 
     save_summary(exp_dir, effective_seeds, run_results)

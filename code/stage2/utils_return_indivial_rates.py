@@ -194,15 +194,19 @@ def generate_temporal_channels(
     decision_period_s=0.001,
     rng=np.random,
 ):
-    """Generate stationary first-order Gauss-Markov small-scale fading."""
+    """Generate first-order Gauss-Markov small-scale fading."""
     initial = np.asarray(initial_normalized_channels, dtype=np.complex128)
     positions = np.asarray(ue_positions, dtype=np.float64)
     speeds = np.asarray(ue_speeds_mps, dtype=np.float64)
     batch_size, episode_steps, num_users = positions.shape[:3]
     if initial.shape[0] != batch_size or initial.shape[2] != num_users:
         raise ValueError("Initial channels do not match trajectory dimensions")
-    if speeds.shape != (batch_size, num_users):
-        raise ValueError("ue_speeds_mps must have shape [B, K]")
+    valid_speed_shapes = (
+        (batch_size, num_users),
+        (batch_size, episode_steps, num_users),
+    )
+    if speeds.shape not in valid_speed_shapes:
+        raise ValueError("ue_speeds_mps must have shape [B,K] or [B,T,K]")
 
     rhos = jakes_correlation(
         speeds, carrier_frequency_hz, decision_period_s
@@ -215,9 +219,10 @@ def generate_temporal_channels(
         dtype=np.complex128,
     )
     normalized[:, 0] = initial
-    rho = rhos[:, None, :, None]
-    innovation_scale = np.sqrt(np.maximum(0.0, 1 - rho**2))
     for period in range(1, episode_steps):
+        period_rhos = rhos if rhos.ndim == 2 else rhos[:, period - 1]
+        rho = period_rhos[:, None, :, None]
+        innovation_scale = np.sqrt(np.maximum(0.0, 1 - rho**2))
         innovation = complex_normal(initial.shape, rng)
         normalized[:, period] = (
             rho * normalized[:, period - 1]
@@ -241,8 +246,14 @@ def temporal_channel_diagnostics(
     rhos = np.asarray(rhos, dtype=np.float64)
     if normalized.ndim != 5:
         raise ValueError("normalized_channels must have shape [B,T,A,K,M]")
-    if rhos.shape != (normalized.shape[0], normalized.shape[3]):
-        raise ValueError("rhos must have shape [B, K]")
+    static_shape = (normalized.shape[0], normalized.shape[3])
+    dynamic_shape = (
+        normalized.shape[0],
+        normalized.shape[1],
+        normalized.shape[3],
+    )
+    if rhos.shape not in (static_shape, dynamic_shape):
+        raise ValueError("rhos must have shape [B,K] or [B,T,K]")
     if bootstrap_samples <= 0:
         raise ValueError("bootstrap_samples must be positive")
     rng = np.random.default_rng(0) if rng is None else rng
@@ -250,15 +261,6 @@ def temporal_channel_diagnostics(
     sequences = normalized.transpose(0, 2, 3, 4, 1).reshape(
         -1, normalized.shape[1]
     )
-    sequence_rhos = np.broadcast_to(
-        rhos[:, None, :, None],
-        (
-            normalized.shape[0],
-            normalized.shape[2],
-            normalized.shape[3],
-            normalized.shape[4],
-        ),
-    ).reshape(-1)
     valid_lags = np.asarray(
         sorted({int(lag) for lag in lags if 0 < lag < normalized.shape[1]})
     )
@@ -275,7 +277,17 @@ def temporal_channel_diagnostics(
         )
         denominators = np.mean(np.abs(sequences[:, :-lag]) ** 2, axis=1)
         empirical.append(float(numerators.sum() / denominators.sum()))
-        theory.append(float(np.mean(sequence_rhos**lag)))
+        if rhos.ndim == 2:
+            theory.append(float(np.mean(rhos**lag)))
+        else:
+            products = np.ones(
+                (normalized.shape[0], normalized.shape[1] - lag,
+                 normalized.shape[3]),
+                dtype=np.float64,
+            )
+            for offset in range(lag):
+                products *= rhos[:, offset:offset + products.shape[1]]
+            theory.append(float(products.mean()))
         sample_indices = rng.integers(
             0,
             sequences.shape[0],
