@@ -10,18 +10,14 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from data import MyDataLoader
+from evaluate import METHODS, evaluate_snapshot, validate_sample_count
 from model_2 import node_update
 from utils_return_indivial_rates import (
     DIRECT_CHANNEL_FADING,
     DIRECT_CHANNEL_SCALE,
     DIRECT_PATH_LOSS_EXPONENT,
     NOISE_POWER,
-    mrt_beamforming,
-    rzf_beamforming,
 )
-
-
-METHODS = ("centralized_gnn", "decentralized_gnn", "mrt", "rzf")
 
 
 def seed_everything(seed):
@@ -35,13 +31,6 @@ def seed_everything(seed):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
     torch.use_deterministic_algorithms(True, warn_only=True)
-
-
-def validate_sample_count(name, sample_count, batch_size):
-    if sample_count <= 0 or sample_count % batch_size != 0:
-        raise ValueError(
-            f"{name} must be a positive multiple of batch_size={batch_size}"
-        )
 
 
 class Trainer:
@@ -228,89 +217,18 @@ class Trainer:
         return final_eval_results
 
     def eval(self, test_sample):
-        validate_sample_count(
-            "evaluation sample count", test_sample, self.batch_size
+        return evaluate_snapshot(
+            self.model,
+            self.dataloader,
+            test_sample,
+            K=self.K,
+            batch_size=self.batch_size,
+            associate_threshold=self.associate_threshold,
+            pmax_w=self.pmax_w,
+            num_of_AP=self.num_of_AP,
+            device=self.device,
+            noise_power=self.noise_power,
         )
-        self.model.eval()
-        sum_rates = {method: [] for method in METHODS}
-
-        with torch.no_grad():
-            for _ in range(test_sample // self.batch_size):
-                centralized_feature, centralized_index = (
-                    self.dataloader.gen_training_data(
-                        self.K,
-                        self.associate_threshold,
-                        duplicate=False,
-                    )
-                )
-                centralized_feature = centralized_feature.to(self.device)
-                centralized_w = self.model(
-                    centralized_feature,
-                    centralized_index,
-                    training=True,
-                    duplicate=False,
-                )
-                _, centralized_rate, _ = self.dataloader.compute_loss(
-                    centralized_w, self.device, self.noise_power
-                )
-                sum_rates["centralized_gnn"].append(
-                    centralized_rate.item()
-                )
-
-                decentralized_feature, decentralized_index = (
-                    self.dataloader.gen_testing_data(
-                        self.K,
-                        self.associate_threshold,
-                        duplicate=False,
-                        regenerate_channels=False,
-                    )
-                )
-                decentralized_feature = [
-                    feature.to(self.device)
-                    for feature in decentralized_feature
-                ]
-                decentralized_w = self.model(
-                    decentralized_feature,
-                    decentralized_index,
-                    training=False,
-                    duplicate=False,
-                )
-                _, decentralized_rate, _ = self.dataloader.compute_loss(
-                    decentralized_w, self.device, self.noise_power
-                )
-                sum_rates["decentralized_gnn"].append(
-                    decentralized_rate.item()
-                )
-
-                channels = self.dataloader.get_stacked_channels()
-                association_mask = self.dataloader.get_association_mask()
-                mrt_w = mrt_beamforming(
-                    channels,
-                    association_mask,
-                    self.pmax_w,
-                    self.device,
-                )
-                _, mrt_rate, _ = self.dataloader.compute_loss(
-                    mrt_w, self.device, self.noise_power
-                )
-                sum_rates["mrt"].append(mrt_rate.item())
-
-                rzf_w = rzf_beamforming(
-                    channels,
-                    association_mask,
-                    self.pmax_w,
-                    self.device,
-                    self.noise_power,
-                )
-                _, rzf_rate, _ = self.dataloader.compute_loss(
-                    rzf_w, self.device, self.noise_power
-                )
-                sum_rates["rzf"].append(rzf_rate.item())
-
-        return {
-            method: float(np.mean(values))
-            for method, values in sum_rates.items()
-        }
 
 
 def save_summary(exp_dir, seeds, run_results):
