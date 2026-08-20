@@ -189,7 +189,8 @@ class Trainer:
                 and iteration >= 1
             ):
                 metrics = self.eval(test_sample_val)
-                for method, value in metrics.items():
+                for method in METHODS:
+                    value = metrics[method]
                     validation[method].append(value)
                     writer.add_scalar(
                         f"Val/{method}", value, iteration + 1
