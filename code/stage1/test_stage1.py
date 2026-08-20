@@ -2,6 +2,7 @@ import numpy as np
 import torch
 
 from data import MyDataLoader
+from environment import SnapshotEnvironment
 from model_2 import node_update
 from trainer_2 import Trainer, seed_everything
 from utils_return_indivial_rates import mrt_beamforming, rzf_beamforming
@@ -24,7 +25,7 @@ EXPECTED_EVAL_METRICS = {
 def build_snapshot(seed):
     np.random.seed(seed)
     torch.manual_seed(seed)
-    loader = MyDataLoader(NUM_ANTENNAS, BATCH_SIZE)
+    loader = SnapshotEnvironment(NUM_ANTENNAS, BATCH_SIZE)
     centralized_feature, centralized_index = loader.gen_training_data(
         NUM_USERS, 0.1
     )
@@ -103,6 +104,7 @@ def assert_evaluator_contract():
 
 
 def main():
+    assert MyDataLoader is SnapshotEnvironment
     first = build_snapshot(0)
     expected_w_shape = (
         BATCH_SIZE,

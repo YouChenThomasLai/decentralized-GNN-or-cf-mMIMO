@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from data import MyDataLoader
+from environment import SnapshotEnvironment
 from evaluate import METHODS, evaluate_snapshot
 from model_2 import node_update
 from utils_return_indivial_rates import NOISE_POWER
@@ -46,7 +46,7 @@ class Trainer:
         self.batch_size = batch_size
         self.n_iter = n_iter
         self.num_of_AP = 5
-        self.dataloader = MyDataLoader(M, batch_size)
+        self.dataloader = SnapshotEnvironment(M, batch_size)
         requested_device = torch.device(device)
         if requested_device.type == "cuda" and not torch.cuda.is_available():
             requested_device = torch.device("cpu")
