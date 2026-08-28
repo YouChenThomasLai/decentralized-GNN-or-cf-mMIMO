@@ -4,6 +4,10 @@
 
 Research code is grouped by experiment stage under `code/stage0/`, `code/stage1/`, and `code/stage2/`; each stage owns its source, sweep scripts, and local results. Stage 0's `trainer_2.py` trains, `model_2.py` defines the network, `data.py` generates datasets, and `utils_return_indivial_rates.py` provides numerical utilities. `code/stage0/excel_helper.py` summarizes Stage 0 outputs, while the shared `code/plot-v2.py` plots Stage 0 or Stage 1 sweeps. The shared Conda specification remains at `code/environment.yml`. Research notes and papers belong in `doc/`. Treat stage-local `results*/`, checkpoints, logs, spreadsheets, and generated plots as artifacts rather than source.
 
+## Subagent Use
+
+Subagents may be used for research-heavy tasks such as reading papers, surveying literature, comparing methods, and summarizing independent sources. The primary agent remains responsible for integrating and verifying their findings.
+
 ## Build, Test, and Development Commands
 
 Create the documented environment from the repository root:
