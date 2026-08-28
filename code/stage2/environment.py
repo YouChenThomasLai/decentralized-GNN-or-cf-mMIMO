@@ -4,13 +4,16 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from utils_return_indivial_rates import (
+    HEIGHT_DIFFERENCE,
+    SQUARE_SIDE,
     cal_loss,
     complex_normal,
-    gen_fixed_location,
-    gen_location,
     generate_channel,
     generate_temporal_channels,
+    sample_square_bpp,
     temporal_channel_diagnostics,
+    wrapped_displacement,
+    wrapped_horizontal_distance,
 )
 
 
@@ -22,6 +25,12 @@ MOBILITY_PHASE_LABELS = np.asarray(("dwell", "transit"))
 DEFAULT_HOTSPOT_CENTERS = np.asarray(
     ((35.0, 0.0), (0.0, 35.0), (-35.0, 0.0), (0.0, -35.0))
 )
+TOPOLOGY_TYPE = "fixed_count_bpp_square_torus"
+WRAP_AROUND = True
+
+
+def _wrap_positions(positions):
+    return wrapped_displacement(np.zeros(2), positions)
 
 
 def symmetric_transition_matrix(hotspot_count, stickiness):
@@ -50,8 +59,9 @@ def stationary_distribution(transition_matrix):
 def _sample_disk(rng, center, radius_m):
     angle = rng.uniform(0, 2 * np.pi)
     radius = radius_m * np.sqrt(rng.uniform())
-    return np.asarray(center) + radius * np.asarray(
-        (np.cos(angle), np.sin(angle))
+    return _wrap_positions(
+        np.asarray(center)
+        + radius * np.asarray((np.cos(angle), np.sin(angle)))
     )
 
 
@@ -90,10 +100,10 @@ def hotspot_process_diagnostics(
         self_motion = 0.0
         step_limit_violation = 0.0
         endpoint_error = 0.0
-        max_radius = float(np.linalg.norm(position))
+        max_abs_coordinate = float(np.max(np.abs(position)))
         if next_state != state:
             target = _sample_disk(rng, centers[next_state], radius_m)
-            offset = target - position
+            offset = wrapped_displacement(position, target)
             distance = float(np.linalg.norm(offset))
             transit_s = distance / transit_speed_mps
             velocity = offset / transit_s
@@ -103,16 +113,20 @@ def hotspot_process_diagnostics(
                 float(np.linalg.norm(step_s * velocity))
                 - transit_speed_mps * decision_period_s,
             )
-            position = position + transit_s * velocity
-            endpoint_error = float(np.linalg.norm(position - target))
-            max_radius = max(max_radius, float(np.linalg.norm(position)))
+            position = _wrap_positions(position + transit_s * velocity)
+            endpoint_error = float(
+                wrapped_horizontal_distance(position, target)
+            )
+            max_abs_coordinate = max(
+                max_abs_coordinate, float(np.max(np.abs(position)))
+            )
         return (
             next_state,
             position,
             dwell,
             distance,
             self_motion,
-            max_radius,
+            max_abs_coordinate,
             step_limit_violation,
             endpoint_error,
         )
@@ -127,7 +141,7 @@ def hotspot_process_diagnostics(
     residence_durations = []
     residence_s = 0.0
     transit_time_s = 0.0
-    max_boundary_radius_m = 0.0
+    max_abs_coordinate_m = 0.0
     self_transition_motion_distance_max_m = 0.0
     max_step_limit_violation_m = 0.0
     transit_endpoint_error_max_m = 0.0
@@ -144,7 +158,7 @@ def hotspot_process_diagnostics(
             dwell,
             transit_distance,
             self_motion,
-            max_radius,
+            max_abs_coordinate,
             step_limit_violation,
             endpoint_error,
         ) = event_step(state, position)
@@ -154,7 +168,9 @@ def hotspot_process_diagnostics(
         dwell_time_by_state[previous_state] += dwell
         transition_counts[previous_state, state] += 1
         transit_time_s += transit_distance / transit_speed_mps
-        max_boundary_radius_m = max(max_boundary_radius_m, max_radius)
+        max_abs_coordinate_m = max(
+            max_abs_coordinate_m, max_abs_coordinate
+        )
         self_transition_motion_distance_max_m = max(
             self_transition_motion_distance_max_m, self_motion
         )
@@ -213,7 +229,7 @@ def hotspot_process_diagnostics(
             transit_time_s / natural_total
         ),
         "natural_time_total_s": np.asarray(natural_total),
-        "max_boundary_radius_m": np.asarray(max_boundary_radius_m),
+        "max_abs_coordinate_m": np.asarray(max_abs_coordinate_m),
         "max_step_limit_violation_m": np.asarray(
             max_step_limit_violation_m
         ),
@@ -251,12 +267,23 @@ class Base_station(Dataset):
 
 
 class SnapshotEnvironment(Dataset):
-    def __init__(self, M, batch_size):
+    def __init__(self, M, batch_size, bs_locations=None):
         super().__init__()
         self.M = M
         self.batch_size = batch_size
-        self.length = 100
-        self.BS_Loc_array = gen_fixed_location(5, self.length * 2)
+        self.square_side = SQUARE_SIDE
+        self.height_difference = HEIGHT_DIFFERENCE
+        self.topology_type = TOPOLOGY_TYPE
+        self.wrap_around = WRAP_AROUND
+        if bs_locations is None:
+            bs_locations = sample_square_bpp(5, self.square_side)
+        self.BS_Loc_array = np.asarray(bs_locations, dtype=np.float64)
+        if self.BS_Loc_array.shape != (5, 2):
+            raise ValueError("bs_locations must have shape [5,2]")
+        if not np.all(np.isfinite(self.BS_Loc_array)) or np.any(
+            np.abs(self.BS_Loc_array) >= self.square_side / 2
+        ):
+            raise ValueError("AP coordinates must lie inside the square")
         self.BS_array = [
             Base_station(M, location) for location in self.BS_Loc_array
         ]
@@ -266,7 +293,7 @@ class SnapshotEnvironment(Dataset):
 
     def BS_user_association(self, K, ratio):
         self.K = K
-        self.user_loc = gen_location(K, self.length)
+        self.user_loc = sample_square_bpp(K, self.square_side)
         RSSI = np.zeros((self.batch_size, K, len(self.BS_array)))
 
         for ap, base_station in enumerate(self.BS_array):
@@ -353,7 +380,6 @@ class MobilityEnvironment(SnapshotEnvironment):
         speed_kmh=0.0,
         decision_period_s=0.001,
         carrier_frequency_hz=2.6e9,
-        trajectory_radius_m=100.0,
         seed=0,
         mobility_model=MOBILITY_STRAIGHT,
         hotspot_centers=None,
@@ -362,19 +388,21 @@ class MobilityEnvironment(SnapshotEnvironment):
         dwell_mean_s=5.0,
         dwell_shape=2.0,
         hotspot_trace_duration_s=300.0,
+        bs_locations=None,
     ):
-        super().__init__(M, batch_size)
+        if bs_locations is None:
+            raise ValueError("Stage 2 requires frozen Stage 1C AP coordinates")
+        super().__init__(M, batch_size, bs_locations)
         if episode_steps <= 0 or decision_period_s <= 0:
             raise ValueError("episode_steps and decision_period_s must be positive")
-        if carrier_frequency_hz <= 0 or trajectory_radius_m <= 0:
-            raise ValueError("Carrier frequency and trajectory radius must be positive")
+        if carrier_frequency_hz <= 0:
+            raise ValueError("Carrier frequency must be positive")
         if mobility_model not in (MOBILITY_STRAIGHT, MOBILITY_HOTSPOT):
             raise ValueError("Unknown mobility model")
         self.episode_steps = episode_steps
         self.speed_kmh = speed_kmh
         self.decision_period_s = decision_period_s
         self.carrier_frequency_hz = carrier_frequency_hz
-        self.trajectory_radius_m = trajectory_radius_m
         self.seed = seed
         self.mobility_model = mobility_model
         self.hotspot_centers = np.asarray(
@@ -415,11 +443,12 @@ class MobilityEnvironment(SnapshotEnvironment):
         matrix = self.transition_matrix
         if centers.ndim != 2 or centers.shape[1] != 2 or not len(centers):
             raise ValueError("hotspot_centers must have shape [J,2]")
-        if np.any(
-            np.linalg.norm(centers, axis=1) + self.hotspot_radius_m
-            > self.trajectory_radius_m
+        if self.hotspot_radius_m <= 0 or self.hotspot_radius_m >= SQUARE_SIDE / 2:
+            raise ValueError("hotspot_radius_m must be in (0, square_side/2)")
+        if not np.all(np.isfinite(centers)) or np.any(
+            np.abs(centers) >= SQUARE_SIDE / 2
         ):
-            raise ValueError("Every hotspot must lie inside the UE disk")
+            raise ValueError("Hotspot centers must lie inside the square")
         if matrix.shape != (len(centers), len(centers)):
             raise ValueError("transition_matrix must have shape [J,J]")
         if np.any(matrix < 0) or not np.allclose(matrix.sum(axis=1), 1):
@@ -453,11 +482,9 @@ class MobilityEnvironment(SnapshotEnvironment):
 
     def _make_initial_positions(self, K, initial_positions, rng):
         if initial_positions is None:
-            angles = rng.uniform(0, 2 * np.pi, (self.batch_size, K))
-            radii = rng.uniform(0, self.trajectory_radius_m, (self.batch_size, K))
-            return radii[..., None] * np.stack(
-                (np.cos(angles), np.sin(angles)), axis=-1
-            )
+            return sample_square_bpp(
+                self.batch_size * K, rng=rng
+            ).reshape(self.batch_size, K, 2)
         positions = np.asarray(initial_positions, dtype=np.float64)
         if positions.shape == (K, 2):
             positions = np.broadcast_to(
@@ -465,50 +492,19 @@ class MobilityEnvironment(SnapshotEnvironment):
             ).copy()
         if positions.shape != (self.batch_size, K, 2):
             raise ValueError("initial_positions must have shape [K,2] or [B,K,2]")
-        if np.any(np.linalg.norm(positions, axis=-1) > self.trajectory_radius_m):
-            raise ValueError("Initial positions must lie inside the UE disk")
+        if not np.all(np.isfinite(positions)) or np.any(
+            np.abs(positions) >= SQUARE_SIDE / 2
+        ):
+            raise ValueError("Initial positions must lie inside the square")
         return positions
 
     def _make_straight_positions(self, initial_positions, speeds_mps, rng):
-        total_time = (self.episode_steps - 1) * self.decision_period_s
-        travel_distances = speeds_mps * total_time
-        if np.any(travel_distances > 2 * self.trajectory_radius_m):
-            raise ValueError("A straight trajectory cannot fit inside the UE disk")
-        start_radii = np.linalg.norm(initial_positions, axis=-1)
-        if np.any(travel_distances > self.trajectory_radius_m + start_radii):
-            raise ValueError(
-                "A straight trajectory cannot fit from its initial position"
-            )
-        directions = np.empty_like(speeds_mps)
-        for trajectory in range(self.batch_size):
-            for user in range(speeds_mps.shape[1]):
-                start_radius = start_radii[trajectory, user]
-                travel_distance = travel_distances[trajectory, user]
-                if start_radius > 0 and np.isclose(
-                    travel_distance,
-                    self.trajectory_radius_m + start_radius,
-                    rtol=0,
-                    atol=np.finfo(np.float64).eps * self.trajectory_radius_m,
-                ):
-                    position = initial_positions[trajectory, user]
-                    directions[trajectory, user] = (
-                        np.arctan2(-position[1], -position[0]) % (2 * np.pi)
-                    )
-                    continue
-                while True:
-                    direction = rng.uniform(0, 2 * np.pi)
-                    endpoint = initial_positions[trajectory, user] + (
-                        travel_distance
-                        * np.asarray((np.cos(direction), np.sin(direction)))
-                    )
-                    if np.linalg.norm(endpoint) <= self.trajectory_radius_m:
-                        directions[trajectory, user] = direction
-                        break
+        directions = rng.uniform(0, 2 * np.pi, speeds_mps.shape)
         unit_directions = np.stack(
             (np.cos(directions), np.sin(directions)), axis=-1
         )
         times = np.arange(self.episode_steps) * self.decision_period_s
-        positions = (
+        positions = _wrap_positions(
             initial_positions[:, None]
             + times[None, :, None, None]
             * speeds_mps[:, None, :, None]
@@ -518,9 +514,8 @@ class MobilityEnvironment(SnapshotEnvironment):
 
     def _configured_burn_in(self, speed_mps):
         stationary = stationary_distribution(self.transition_matrix)
-        center_distances = np.linalg.norm(
-            self.hotspot_centers[:, None] - self.hotspot_centers[None],
-            axis=-1,
+        center_distances = wrapped_horizontal_distance(
+            self.hotspot_centers[:, None], self.hotspot_centers[None]
         )
         expected_transit_s = np.sum(
             stationary[:, None]
@@ -573,7 +568,7 @@ class MobilityEnvironment(SnapshotEnvironment):
                 self.hotspot_centers[next_state],
                 self.hotspot_radius_m,
             )
-            offset = target - position
+            offset = wrapped_displacement(position, target)
             transit_s = np.linalg.norm(offset) / speed_mps
             end_s = min(time_s + transit_s, duration_s)
             segments.append(
@@ -587,7 +582,9 @@ class MobilityEnvironment(SnapshotEnvironment):
                 )
             )
             elapsed_s = end_s - time_s
-            position = position + elapsed_s * offset / transit_s
+            position = _wrap_positions(
+                position + elapsed_s * offset / transit_s
+            )
             if end_s == duration_s:
                 break
             position = target
@@ -633,14 +630,18 @@ class MobilityEnvironment(SnapshotEnvironment):
                     )
                     start, end, phase, state, origin, velocity = segments[index]
                     elapsed = min(query_time - start, end - start)
-                    positions[trajectory, period, user] = origin + elapsed * velocity
+                    positions[trajectory, period, user] = _wrap_positions(
+                        origin + elapsed * velocity
+                    )
                     states[trajectory, period, user] = state
                     sample_phases[trajectory, period, user] = phase
 
         instantaneous_speeds = np.empty(states.shape, dtype=np.float64)
         if self.episode_steps > 1:
             instantaneous_speeds[:, :-1] = (
-                np.linalg.norm(np.diff(positions, axis=1), axis=-1)
+                wrapped_horizontal_distance(
+                    positions[:, :-1], positions[:, 1:]
+                )
                 / self.decision_period_s
             )
             instantaneous_speeds[:, -1] = np.where(
@@ -660,7 +661,7 @@ class MobilityEnvironment(SnapshotEnvironment):
             MOBILITY_PHASE_DWELL,
         ).astype(np.uint8)
         displacement = (
-            positions[:, 1] - positions[:, 0]
+            wrapped_displacement(positions[:, 0], positions[:, 1])
             if self.episode_steps > 1
             else np.zeros((batch_size, num_users, 2))
         )
@@ -822,16 +823,17 @@ class MobilityEnvironment(SnapshotEnvironment):
 
     def mobility_diagnostics(self):
         self._require_trajectories()
-        step_distances = np.linalg.norm(
-            np.diff(self.ue_positions, axis=1), axis=-1
+        step_distances = wrapped_horizontal_distance(
+            self.ue_positions[:, :-1], self.ue_positions[:, 1:]
         )
         step_limits = (
             self.ue_speeds_mps[:, None] * self.decision_period_s
         )
         diagnostics = {
-            "max_position_radius_m": np.asarray(
-                np.linalg.norm(self.ue_positions, axis=-1).max()
+            "max_abs_coordinate_m": np.asarray(
+                np.abs(self.ue_positions).max()
             ),
+            "min_ap_ue_distance_m": np.asarray(self.distances.min()),
             "max_step_limit_violation_m": np.asarray(
                 max(0.0, float(np.max(step_distances - step_limits)))
                 if step_distances.size

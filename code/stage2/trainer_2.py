@@ -17,13 +17,19 @@ from environment import (
     DEFAULT_HOTSPOT_CENTERS,
     MOBILITY_HOTSPOT,
     MOBILITY_STRAIGHT,
+    TOPOLOGY_TYPE,
+    WRAP_AROUND,
     MobilityEnvironment,
     hotspot_process_diagnostics,
     symmetric_transition_matrix,
 )
 from evaluate import METHODS, TrajectoryEvaluator, load_frozen_model
 from model_2 import node_update
-from utils_return_indivial_rates import independent_channel_diagnostics
+from utils_return_indivial_rates import (
+    HEIGHT_DIFFERENCE,
+    SQUARE_SIDE,
+    independent_channel_diagnostics,
+)
 
 
 SOURCE_FILES = (
@@ -35,6 +41,15 @@ SOURCE_FILES = (
     "utils_return_indivial_rates.py",
     "run_exp-v2.sh",
     "test_stage2.py",
+)
+EXPECTED_STAGE1C_CHECKPOINT_SHA256 = (
+    "16dba87572cd9f9dfc3272b4faeda2d7127dc414945450b856758efdba7bba45"
+)
+EXPECTED_STAGE1C_AP_SHA256 = (
+    "421b817e0e1e70b88db4e2ef685954b35f2e65432ffcb056190adb881df8b92d"
+)
+EXPECTED_STAGE1C_CONFIG_SHA256 = (
+    "ace7fbe95ab86dab070de0a04b7517edd1924af1271446fc69d94e72cd98cf0b"
 )
 
 
@@ -59,7 +74,12 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def save_provenance(out_dir, checkpoint_path=None):
+def save_provenance(
+    out_dir,
+    checkpoint_path=None,
+    ap_coordinates_path=None,
+    stage1_config_path=None,
+):
     source_dir = Path(__file__).resolve().parent
     snapshot_dir = out_dir / "source_snapshot"
     snapshot_dir.mkdir(parents=True, exist_ok=True)
@@ -87,6 +107,8 @@ def save_provenance(out_dir, checkpoint_path=None):
         "checkpoint_sha256": (
             sha256(checkpoint_path) if checkpoint_path is not None else None
         ),
+        "ap_coordinates_sha256": sha256(ap_coordinates_path),
+        "stage1_config_sha256": sha256(stage1_config_path),
     }
     with open(out_dir / "provenance.json", "w") as output:
         json.dump(provenance, output, indent=2, sort_keys=True)
@@ -125,6 +147,7 @@ def channel_gate_passed(diagnostics):
 def save_environment(loader, out_dir):
     environment = {
         "mobility_model": np.asarray(loader.mobility_model),
+        "ap_coordinates": loader.BS_Loc_array,
         "ue_positions": loader.ue_positions,
         "ue_speeds_mps": loader.ue_speeds_mps,
         "ue_directions_rad": loader.ue_directions_rad,
@@ -182,6 +205,8 @@ def parse_args():
     parser.add_argument("--channel_diagnostic_samples", type=int, default=50000)
     parser.add_argument("--diagnostics_only", action="store_true")
     parser.add_argument("--checkpoint")
+    parser.add_argument("--ap_coordinates", required=True)
+    parser.add_argument("--stage1_config", required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--out_dir", default="results_stage2")
     args = parser.parse_args()
@@ -214,6 +239,11 @@ def parse_args():
         args.checkpoint = str(Path(args.checkpoint).expanduser().resolve())
         if not Path(args.checkpoint).is_file():
             parser.error(f"Checkpoint does not exist: {args.checkpoint}")
+    for name in ("ap_coordinates", "stage1_config"):
+        path = Path(getattr(args, name)).expanduser().resolve()
+        if not path.is_file():
+            parser.error(f"{name} does not exist: {path}")
+        setattr(args, name, str(path))
     return args
 
 
@@ -226,16 +256,23 @@ def run(args, logger, out_dir, provenance):
     transition_matrix = symmetric_transition_matrix(
         len(DEFAULT_HOTSPOT_CENTERS), args.hotspot_stickiness
     )
+    ap_coordinates = np.loadtxt(args.ap_coordinates)
     pmax_w = 10 ** ((args.pmax_dbm - 30) / 10)
     config = {
         "execution_mode": (
             "environment_diagnostics_only"
             if args.diagnostics_only
-            else "frozen_stage1b_checkpoint_evaluation"
+            else "frozen_stage1c_checkpoint_evaluation"
         ),
         "cli": vars(args),
         "effective_device": str(requested_device),
         "num_ap": 5,
+        "topology_type": TOPOLOGY_TYPE,
+        "square_side_m": SQUARE_SIDE,
+        "coordinate_bounds_m": [-SQUARE_SIDE / 2, SQUARE_SIDE / 2],
+        "wrap_around": WRAP_AROUND,
+        "height_difference_m": HEIGHT_DIFFERENCE,
+        "ap_coordinates": ap_coordinates.tolist(),
         "pmax_w": pmax_w,
         "association_threshold": 0.1,
         "association_policy": "Stage 1 threshold at t=0, fixed for clip",
@@ -249,6 +286,8 @@ def run(args, logger, out_dir, provenance):
         "channel_model": "Jakes-calibrated first-order Gauss-Markov AR(1)",
         "source_sha256": provenance["source_sha256"],
         "checkpoint_sha256": provenance["checkpoint_sha256"],
+        "ap_coordinates_sha256": provenance["ap_coordinates_sha256"],
+        "stage1_config_sha256": provenance["stage1_config_sha256"],
         "hotspot_transition_matrix": (
             transition_matrix.tolist()
             if args.mobility_model == MOBILITY_HOTSPOT
@@ -272,6 +311,7 @@ def run(args, logger, out_dir, provenance):
         dwell_mean_s=args.hotspot_dwell_mean_s,
         dwell_shape=args.hotspot_dwell_shape,
         hotspot_trace_duration_s=args.hotspot_trace_duration_s,
+        bs_locations=ap_coordinates,
     ).generate_trajectories(args.K, 0.1)
     save_environment(loader, out_dir)
     mobility_diagnostics = loader.mobility_diagnostics()
@@ -307,7 +347,10 @@ def run(args, logger, out_dir, provenance):
     )
 
     mobility_pass = bool(
-        float(mobility_diagnostics["max_position_radius_m"]) <= 100 + 1e-12
+        float(mobility_diagnostics["max_abs_coordinate_m"])
+        < SQUARE_SIDE / 2
+        and float(mobility_diagnostics["min_ap_ue_distance_m"])
+        >= HEIGHT_DIFFERENCE
         and float(mobility_diagnostics["max_step_limit_violation_m"]) <= 1e-10
     )
     if args.mobility_model == MOBILITY_STRAIGHT:
@@ -369,8 +412,8 @@ def run(args, logger, out_dir, provenance):
                 process_diagnostics["self_transition_motion_distance_max_m"]
             )
             == 0
-            and float(process_diagnostics["max_boundary_radius_m"])
-            <= 100 + 1e-12
+            and float(process_diagnostics["max_abs_coordinate_m"])
+            < SQUARE_SIDE / 2
             and float(process_diagnostics["max_step_limit_violation_m"])
             <= 1e-10
             and float(process_diagnostics["transit_endpoint_error_max_m"])
@@ -448,7 +491,22 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     logger = configure_logging(out_dir)
     try:
-        provenance = save_provenance(out_dir, args.checkpoint)
+        provenance = save_provenance(
+            out_dir,
+            args.checkpoint,
+            args.ap_coordinates,
+            args.stage1_config,
+        )
+        if provenance["ap_coordinates_sha256"] != EXPECTED_STAGE1C_AP_SHA256:
+            raise RuntimeError("Stage 1C AP-coordinate SHA-256 mismatch")
+        if provenance["stage1_config_sha256"] != EXPECTED_STAGE1C_CONFIG_SHA256:
+            raise RuntimeError("Stage 1C config SHA-256 mismatch")
+        if (
+            args.checkpoint
+            and provenance["checkpoint_sha256"]
+            != EXPECTED_STAGE1C_CHECKPOINT_SHA256
+        ):
+            raise RuntimeError("Stage 1C checkpoint SHA-256 mismatch")
         run(args, logger, out_dir, provenance)
     except Exception:
         completion_path = out_dir / "completion.json"

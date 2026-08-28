@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import numpy as np
@@ -21,12 +22,17 @@ from utils_return_indivial_rates import (
     DIRECT_CHANNEL_FADING,
     DIRECT_CHANNEL_SCALE,
     DIRECT_PATH_LOSS_EXPONENT,
+    HEIGHT_DIFFERENCE,
+    SQUARE_SIDE,
     cal_loss,
     generate_channel,
     independent_channel_diagnostics,
     jakes_correlation,
     mrt_beamforming,
     rzf_beamforming,
+    wrapped_3d_distance,
+    wrapped_displacement,
+    wrapped_horizontal_distance,
 )
 
 
@@ -36,11 +42,15 @@ NUM_USERS = 3
 BATCH_SIZE = 2
 PMAX = 10 ** ((15 - 30) / 10)
 DEVICE = torch.device("cpu")
-CHECKPOINT = (
+DEFAULT_STAGE1C_RUN = (
     Path(__file__).resolve().parents[1]
-    / "stage1/results_stage1b_full_noise_1e-12/"
-    / "M2_K8_P15.0/run0/models/model_final_run0.pt"
+    / "stage1/remote_backup_2026-08-24/results_stage1c_bpp_noise_1e-12/"
+    / "M2_K8_P15.0/run0"
 )
+STAGE1C_RUN = Path(os.environ.get("STAGE1C_RUN_DIR", DEFAULT_STAGE1C_RUN))
+CHECKPOINT = STAGE1C_RUN / "models/model_final_run0.pt"
+AP_COORDINATES_PATH = STAGE1C_RUN / "arrays/BS_0.txt"
+AP_COORDINATES = np.loadtxt(AP_COORDINATES_PATH)
 
 
 def assert_mask_and_power(weights, association_mask, num_users, pmax=PMAX):
@@ -58,7 +68,9 @@ def assert_mask_and_power(weights, association_mask, num_users, pmax=PMAX):
 
 def assert_copied_stage1_snapshot_path():
     seed_everything(0)
-    loader = SnapshotEnvironment(NUM_ANTENNAS, BATCH_SIZE)
+    loader = SnapshotEnvironment(
+        NUM_ANTENNAS, BATCH_SIZE, AP_COORDINATES
+    )
     central, central_mask = loader.gen_training_data(NUM_USERS, 0.1)
     local, local_masks = loader.gen_testing_data(
         NUM_USERS, 0.1, regenerate_channels=False
@@ -89,7 +101,9 @@ def assert_stage1_t0_compatibility():
     initial_positions = np.asarray(
         ((10.0, 5.0), (-25.0, 8.0), (3.0, -40.0))
     )
-    reference = SnapshotEnvironment(NUM_ANTENNAS, BATCH_SIZE)
+    reference = SnapshotEnvironment(
+        NUM_ANTENNAS, BATCH_SIZE, AP_COORDINATES
+    )
     stage1_channels = np.stack(
         [
             generate_channel(
@@ -103,10 +117,9 @@ def assert_stage1_t0_compatibility():
         ],
         axis=1,
     )
-    distances = np.linalg.norm(
-        reference.BS_Loc_array[None, :, None]
-        - initial_positions[None, None],
-        axis=-1,
+    distances = wrapped_3d_distance(
+        reference.BS_Loc_array[None, :, None, :],
+        initial_positions[None, None, :, :],
     )
     path_loss = (
         DIRECT_CHANNEL_FADING
@@ -120,6 +133,7 @@ def assert_stage1_t0_compatibility():
         episode_steps=8,
         speed_kmh=0,
         seed=12,
+        bs_locations=AP_COORDINATES,
     ).generate_trajectories(
         NUM_USERS,
         0.1,
@@ -172,6 +186,7 @@ def build_straight(seed, speed_kmh=80):
         episode_steps=80,
         speed_kmh=speed_kmh,
         seed=seed,
+        bs_locations=AP_COORDINATES,
     ).generate_trajectories(2, 0.1)
 
 
@@ -190,10 +205,13 @@ def assert_straight_kinematics_and_reproducibility():
     assert not np.array_equal(first.ue_positions, different.ue_positions)
     assert not np.array_equal(first.true_channels, different.true_channels)
 
-    steps = np.linalg.norm(np.diff(first.ue_positions, axis=1), axis=-1)
+    steps = wrapped_horizontal_distance(
+        first.ue_positions[:, :-1], first.ue_positions[:, 1:]
+    )
     expected = first.ue_speeds_mps[:, None] * first.decision_period_s
     assert np.max(np.abs(steps - expected)) < 1e-10
-    assert np.max(np.linalg.norm(first.ue_positions, axis=-1)) <= 100 + 1e-12
+    assert np.max(np.abs(first.ue_positions)) < SQUARE_SIDE / 2
+    assert first.distances.min() >= HEIGHT_DIFFERENCE
     expected_path_loss = (
         DIRECT_CHANNEL_FADING
         * first.distances ** (-DIRECT_PATH_LOSS_EXPONENT)
@@ -206,20 +224,14 @@ def assert_straight_kinematics_and_reproducibility():
     )
     assert not hasattr(first, "stored_channels")
 
-    try:
-        MobilityEnvironment(
-            1,
-            1,
-            episode_steps=2,
-            decision_period_s=1,
-            speed_kmh=540,
-        ).generate_trajectories(
-            1, initial_positions=np.zeros((1, 2))
-        )
-    except ValueError as error:
-        assert "initial position" in str(error)
-    else:
-        raise AssertionError("An infeasible straight trajectory was accepted")
+    assert np.array_equal(
+        wrapped_displacement((99.0, 0.0), (-99.0, 0.0)),
+        np.asarray((2.0, 0.0)),
+    )
+    assert np.isclose(
+        wrapped_3d_distance((99.0, 0.0), (-99.0, 0.0)),
+        np.sqrt(2.0**2 + HEIGHT_DIFFERENCE**2),
+    )
 
 
 def assert_channel_contract():
@@ -250,6 +262,7 @@ def assert_hotspot_contract():
         speed_kmh=30,
         seed=0,
         mobility_model=MOBILITY_HOTSPOT,
+        bs_locations=AP_COORDINATES,
     ).generate_trajectories(2, 0.1)
     assert loader.hotspot_state.shape == (4, 2000, 2)
     assert loader.mobility_phase.shape == (4, 2000, 2)
@@ -270,7 +283,8 @@ def assert_hotspot_contract():
         <= loader.hotspot_burn_in_s + loader.hotspot_trace_duration_s + 1e-12
     )
     diagnostics = loader.mobility_diagnostics()
-    assert diagnostics["max_position_radius_m"] <= 100 + 1e-12
+    assert diagnostics["max_abs_coordinate_m"] < SQUARE_SIDE / 2
+    assert diagnostics["min_ap_ue_distance_m"] >= HEIGHT_DIFFERENCE
     assert diagnostics["max_step_limit_violation_m"] <= 1e-10
     assert diagnostics["dwell_channel_max_abs_change"] == 0
     assert np.allclose(
@@ -305,7 +319,7 @@ def assert_hotspot_contract():
             float(process["merged_residence_mean_s"]) / residence_target - 1
         ) <= 0.05
         assert process["self_transition_motion_distance_max_m"] == 0
-        assert process["max_boundary_radius_m"] <= 45 + 1e-12
+        assert process["max_abs_coordinate_m"] <= 45 + 1e-12
         assert process["max_step_limit_violation_m"] <= 1e-10
         assert process["transit_endpoint_error_max_m"] <= 1e-10
         assert np.isclose(
@@ -324,6 +338,7 @@ def assert_frozen_evaluator_contract():
         episode_steps=8,
         speed_kmh=30,
         seed=17,
+        bs_locations=AP_COORDINATES,
     ).generate_trajectories(8, 0.1)
     model = node_update(2, 6, PMAX, 64, NUM_AP, DEVICE)
     load_frozen_model(model, CHECKPOINT, DEVICE)

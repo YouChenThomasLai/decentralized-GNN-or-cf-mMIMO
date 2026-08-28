@@ -8,6 +8,8 @@ DIRECT_CHANNEL_FADING = 10 ** (-4.5)
 DIRECT_PATH_LOSS_EXPONENT = 3.5
 NOISE_POWER = 1e-12
 SPEED_OF_LIGHT_MPS = 3e8
+SQUARE_SIDE = 200.0
+HEIGHT_DIFFERENCE = 10.0
 
 
 def gen_location(K, l):
@@ -33,6 +35,39 @@ def gen_fixed_location(K, l):
         locations[k, :] = center + np.array([x, y])
 
     return locations
+
+
+def sample_square_bpp(count, side_length=SQUARE_SIDE, rng=None):
+    if count <= 0 or side_length <= 0:
+        raise ValueError("count and side_length must be positive")
+    generator = np.random if rng is None else rng
+    half_side = side_length / 2
+    return generator.uniform(-half_side, half_side, size=(count, 2))
+
+
+def wrapped_displacement(source, target, side_length=SQUARE_SIDE):
+    if side_length <= 0:
+        raise ValueError("side_length must be positive")
+    delta = np.asarray(target) - np.asarray(source)
+    return (delta + side_length / 2) % side_length - side_length / 2
+
+
+def wrapped_horizontal_distance(source, target, side_length=SQUARE_SIDE):
+    return np.linalg.norm(
+        wrapped_displacement(source, target, side_length), axis=-1
+    )
+
+
+def wrapped_3d_distance(
+    source,
+    target,
+    side_length=SQUARE_SIDE,
+    height_difference=HEIGHT_DIFFERENCE,
+):
+    if height_difference <= 0:
+        raise ValueError("height_difference must be positive")
+    horizontal = wrapped_horizontal_distance(source, target, side_length)
+    return np.sqrt(horizontal**2 + height_difference**2)
 
 
 def gen_BS_location(K, l):
@@ -137,7 +172,7 @@ def generate_channel(M, K, batch_size, loc_BS, loc_user):
                 DIRECT_PATH_LOSS_EXPONENT,
                 0,
                 0,
-                np.linalg.norm(loc_BS - loc_user[k, :]),
+                wrapped_3d_distance(loc_BS, loc_user[k, :]),
             )
             sample_channels.append(h_bs[0])
         channel_bs_user.append(sample_channels)
@@ -167,13 +202,10 @@ def complex_normal(shape, rng):
 
 
 def distance_and_path_loss(ue_positions, bs_locations):
-    offsets = (
-        np.asarray(bs_locations)[None, None, :, None, :]
-        - np.asarray(ue_positions)[:, :, None, :, :]
+    distances = wrapped_3d_distance(
+        np.asarray(ue_positions)[:, :, None, :, :],
+        np.asarray(bs_locations)[None, None, :, None, :],
     )
-    distances = np.linalg.norm(offsets, axis=-1)
-    if np.any(distances == 0):
-        raise ValueError("An AP and UE cannot occupy the same position")
     path_loss = (
         DIRECT_CHANNEL_FADING
         * distances ** (-DIRECT_PATH_LOSS_EXPONENT)

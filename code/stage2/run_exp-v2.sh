@@ -2,13 +2,29 @@
 
 set -euo pipefail
 
-default_checkpoint="../stage1/results_stage1b_full_noise_1e-12/"
+default_checkpoint="../results_stage1c_bpp_noise_1e-12/"
 default_checkpoint+="M2_K8_P15.0/run0/models/model_final_run0.pt"
 checkpoint="${STAGE1_CHECKPOINT:-${default_checkpoint}}"
-output_root="${STAGE2_OUTPUT_ROOT:-results_stage2_mobility}"
+default_ap_coordinates="../results_stage1c_bpp_noise_1e-12/"
+default_ap_coordinates+="M2_K8_P15.0/run0/arrays/BS_0.txt"
+ap_coordinates="${STAGE1_AP_COORDINATES:-${default_ap_coordinates}}"
+default_stage1_config="../results_stage1c_bpp_noise_1e-12/"
+default_stage1_config+="M2_K8_P15.0/run0/config.json"
+stage1_config="${STAGE1_CONFIG:-${default_stage1_config}}"
+output_root="${STAGE2_OUTPUT_ROOT:-results_stage2_bpp}"
 
 if [[ ! -f "${checkpoint}" ]]; then
-    echo "Stage 1B checkpoint not found: ${checkpoint}" >&2
+    echo "Stage 1C checkpoint not found: ${checkpoint}" >&2
+    exit 1
+fi
+for artifact in "${ap_coordinates}" "${stage1_config}"; do
+    if [[ ! -f "${artifact}" ]]; then
+        echo "Stage 1C artifact not found: ${artifact}" >&2
+        exit 1
+    fi
+done
+if [[ -e "${output_root}" ]]; then
+    echo "Stage 2 output already exists: ${output_root}" >&2
     exit 1
 fi
 
@@ -24,6 +40,8 @@ common=(
     --trajectories 10
     --eval_time_stride 10
     --checkpoint "${checkpoint}"
+    --ap_coordinates "${ap_coordinates}"
+    --stage1_config "${stage1_config}"
     --device cuda:0
 )
 
@@ -51,6 +69,8 @@ python trainer_2.py \
     --hotspot_dwell_mean_s 2 \
     --seed 0 \
     --trajectories 10 \
+    --ap_coordinates "${ap_coordinates}" \
+    --stage1_config "${stage1_config}" \
     --out_dir "${output_root}/hotspot_low_stickiness_diagnostics"
 
 python trainer_2.py \
@@ -61,4 +81,6 @@ python trainer_2.py \
     --hotspot_dwell_mean_s 10 \
     --seed 0 \
     --trajectories 10 \
+    --ap_coordinates "${ap_coordinates}" \
+    --stage1_config "${stage1_config}" \
     --out_dir "${output_root}/hotspot_high_stickiness_diagnostics"
