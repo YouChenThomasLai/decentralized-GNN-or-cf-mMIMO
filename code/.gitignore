@@ -5,6 +5,7 @@ __pycache__/
 # Experiment artifacts
 results*/
 past*/
+remote_backup_*/
 *.npy
 *.pt
 events.out.tfevents.*
