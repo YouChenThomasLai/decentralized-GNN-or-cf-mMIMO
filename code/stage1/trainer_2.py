@@ -5,13 +5,16 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import numpy as np
 
+from environment import TOPOLOGY_TYPE, WRAP_AROUND
 from evaluate import METHODS, validate_sample_count
 from train import Trainer, seed_everything
 from utils_return_indivial_rates import (
     DIRECT_CHANNEL_FADING,
     DIRECT_CHANNEL_SCALE,
     DIRECT_PATH_LOSS_EXPONENT,
+    HEIGHT_DIFFERENCE,
     NOISE_POWER,
+    SQUARE_SIDE,
 )
 
 
@@ -127,6 +130,12 @@ def main():
 
         config = {
             "effective_seed": effective_seed,
+            "topology_seed": effective_seed,
+            "topology_type": TOPOLOGY_TYPE,
+            "square_side_m": SQUARE_SIDE,
+            "coordinate_bounds_m": [-SQUARE_SIDE / 2, SQUARE_SIDE / 2],
+            "wrap_around": WRAP_AROUND,
+            "height_difference_m": HEIGHT_DIFFERENCE,
             "cli": vars(args),
             "effective_device": str(trainer.device),
             "num_ap": trainer.num_of_AP,

@@ -4,11 +4,16 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from utils_return_indivial_rates import (
+    HEIGHT_DIFFERENCE,
+    SQUARE_SIDE,
     cal_loss,
-    gen_fixed_location,
-    gen_location,
     generate_channel,
+    sample_square_bpp,
 )
+
+
+TOPOLOGY_TYPE = "fixed_count_bpp_square_torus"
+WRAP_AROUND = True
 
 
 class Base_station(Dataset):
@@ -40,8 +45,11 @@ class SnapshotEnvironment(Dataset):
         super().__init__()
         self.M = M
         self.batch_size = batch_size
-        self.length = 100
-        self.BS_Loc_array = gen_fixed_location(5, self.length * 2)
+        self.square_side = SQUARE_SIDE
+        self.height_difference = HEIGHT_DIFFERENCE
+        self.topology_type = TOPOLOGY_TYPE
+        self.wrap_around = WRAP_AROUND
+        self.BS_Loc_array = sample_square_bpp(5, self.square_side)
         self.BS_array = [
             Base_station(M, location) for location in self.BS_Loc_array
         ]
@@ -51,7 +59,7 @@ class SnapshotEnvironment(Dataset):
 
     def BS_user_association(self, K, ratio):
         self.K = K
-        self.user_loc = gen_location(K, self.length)
+        self.user_loc = sample_square_bpp(K, self.square_side)
         RSSI = np.zeros((self.batch_size, K, len(self.BS_array)))
 
         for ap, base_station in enumerate(self.BS_array):
@@ -128,4 +136,3 @@ class SnapshotEnvironment(Dataset):
 
 
 MyDataLoader = SnapshotEnvironment
-
