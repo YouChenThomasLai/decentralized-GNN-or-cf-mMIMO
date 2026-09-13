@@ -77,8 +77,8 @@ Stage 3使用單一environment seed與development trajectories，曾比較多個
 
 ## 8. Artifact locator
 
-- Stage 3A heuristics：remote `lab301-5090:~/ThomasLai/code/stage3/results_stage3a_bpp/`
-- SAC smoke/training/evaluation：remote `lab301-5090:~/ThomasLai/code/stage3/`下既有`results_stage3b_*` roots
+- Stage 3A heuristics：remote `lab301-5090-tailscale:~/ThomasLai/code/stage3/results_stage3a_bpp/`
+- SAC smoke/training/evaluation：remote `lab301-5090-tailscale:~/ThomasLai/code/stage3/`下既有`results_stage3b_*` roots
 - Source：`code/stage3/`
 
 Artifact保留不代表它們仍屬active experiment matrix；不得因存在checkpoint而自動重新開啟Stage 3。

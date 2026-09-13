@@ -5,9 +5,9 @@
 - Origin Skill: academic-research-suite / experiment-agent
 - Origin Mode: plan
 - Origin Date: 2026-08-18
-- Last Updated: 2026-08-28
-- Verification Status: ACTIVE（Stage 0–5A 已完成；Stage 5B frozen-GNN baseline 與 beamformer-matched RL 尚未實作或執行）
-- Version Label: decentralized_active_csi_plan_v13_compacted
+- Last Updated: 2026-08-29
+- Verification Status: ACTIVE（Stage 0–5A與Stage 5B Gate 5.5已通過；最小beamformer-matched RL core已實作並通過local mechanical tests；下一步為三條deterministic smoke）
+- Version Label: decentralized_active_csi_plan_v14_compacted
 - Living Report: `doc/decentralized_active_csi_experiment_report.md`
 - Active Detail: `doc/stage5_joint_decentralized_active_csi_experiment_plan.md`
 
@@ -47,7 +47,7 @@ Topology、channel、budget、action order 或 visibility contract 若改變，�
 | 3 | Association action qualification；凍結 H3 | 完成 | SAC 為 negative development result，不再補 seed 或搜尋 |
 | 4 | Stored/stale-CSI 與 hard-budget qualification | 完成 | 凍結 priority@B2 與 round-robin control |
 | 5A | Joint evaluator、parent boundaries、RZF modular matrix | 完成 | 只作 Stage 5B 起點 |
-| 5B | Frozen C/D GNN baseline 與 matching RL integration | **下一個 mandatory gate** | 唯一 active method-development 主線 |
+| 5B | Frozen C/D GNN baseline 與 matching RL integration | Gate 5.5 PASS；Gate 5.6待執行 | 唯一 active method-development 主線 |
 | 6 | C/D attribution 與至多兩項必要 ablations | 待 Stage 5B | 不重開 Stage 2–4 |
 | 7 | Paired multi-seed formal evidence | 待方法凍結 | 支持最終主張 |
 
@@ -98,9 +98,9 @@ Seed-0結果只確認兩種 action 在同一 evaluator 中皆非退化。H3+prio
 
 ### 5.2 Stage 5B 執行順序
 
-1. 建立 stage-local frozen Stage 1C GNN adapter。
-2. 在相同 Stage 5 traces完成 C/D GNN的`fixed+RR@B2`、`H3+priority@B2`與`H3+B8` baselines。
-3. 驗證 C/D stored-CSI visibility、dynamic mask、power與 B8 full-current reproduction。
+1. 建立 stage-local frozen Stage 1C GNN adapter。**完成。**
+2. 在相同 Stage 5 traces完成 C/D GNN的`fixed+RR@B2`、`H3+priority@B2`與`H3+B8` baselines。**完成。**
+3. 驗證 C/D stored-CSI visibility、dynamic mask、power與 B8 full-current reproduction。**Gate 5.5 PASS。**
 4. 以相同 actor architecture、split、transition budget與 selection rule，分別訓練 $\pi_{\mathrm{RZF}}$、$\pi_C$、$\pi_D$。
 5. 每個 policy只與相同 beamformer的 no-RL comparator比較；另作 C/D crossed policy evaluation以分離 policy optimization與 inference mode。
 
@@ -135,6 +135,8 @@ Primary B2會填滿可用budget，因此不另加feedback penalty；actual usage
 
 任一 provenance、causality、visibility、constraint或parent boundary失敗時停止performance run，修正 contract並使用fresh root；不得換seed、放寬tolerance或fine-tune GNN掩蓋問題。
 
+Gate 5.5 formal GPU qualification已於2026-08-29完成：straight 0/30/80 km/h共9個RZF/C/D cells全數finite且constraints通過，同cell inputs與Stage 5A byte-identical，C/D `H3+B8`重現Stage 3的最大絕對誤差為0。30 km/h的C/D `H3+priority@B2` retention為99.876%/99.927%，80 km/h為96.767%/97.076%。這只通過frozen-GNN compatibility，不是RL improvement evidence。
+
 ## 6. Stage 6 — 最小 attribution
 
 Stage 5B後先做已訓練 $\pi_C/\pi_D$ 的 crossed C/D evaluation。若仍需ablation，至多從下列選兩項：
@@ -164,7 +166,7 @@ Recurrent/GNN actor、alternative projection、fairness/age cap、hierarchical a
 
 ## 9. 下一個 mandatory gate
 
-直接執行 Stage 5B Gate 5.5：完成 frozen C/D GNN B2/B8 baseline compatibility。Gate 5.5通過前，不新增RL architecture、不啟動RL+GNN training，也不得宣稱frozen-GNN integration或RL+GNN improvement。
+執行Stage 5B Gate 5.6：依序跑$\pi_{\mathrm{RZF}}$、$\pi_D$、$\pi_C$ deterministic smoke，再以完全相同architecture、split、transition ceiling與selection rule跑seed-0 pilots。每條policy只與自己的matching `H3+priority@B2`比較；smoke與pilot完成不等於superiority。Gate 5.5 evidence封存於`code/stage5/results_stage5b_gnn_gate_seed0/`。
 
 ## References
 

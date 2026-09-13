@@ -1,4 +1,6 @@
+import hashlib
 import os
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,8 +10,29 @@ import torch
 from association import hysteresis_top_l_mask, top_l_mask
 from controller import H3, build_modular_trace, expand_trace
 from environment import MobilityEnvironment
-from evaluate import evaluation_device, simulate_cell
+from evaluate import (
+    BEAMFORMERS,
+    EXPECTED_STAGE1C_CHECKPOINT_SHA256,
+    EXPECTED_STAGE1C_MODEL_SHA256,
+    beamformer_checks,
+    evaluation_device,
+    format_gnn_inputs,
+    load_frozen_model,
+    make_beamformer,
+    simulate_cell,
+)
 from feedback import FeedbackState
+from rl_core import (
+    LOCAL_ACTION_DIM,
+    LOCAL_OBSERVATION_DIM,
+    NUM_AP,
+    JointControlEnvironment,
+    JointEpisode,
+    LocalActor,
+    ReplayBuffer,
+    SACTrainer,
+    evaluate_policy,
+)
 
 
 NUM_USERS = 8
@@ -27,7 +50,9 @@ DEFAULT_STAGE1C_RUN = next(
     SOURCE.parent / "results_stage1c_bpp_noise_1e-12/M2_K8_P15.0/run0",
 )
 STAGE1C_RUN = Path(os.environ.get("STAGE1C_RUN_DIR", DEFAULT_STAGE1C_RUN))
+CHECKPOINT = STAGE1C_RUN / "models/model_final_run0.pt"
 AP_COORDINATES = np.loadtxt(STAGE1C_RUN / "arrays/BS_0.txt")
+PMAX_W = 10 ** ((15 - 30) / 10)
 
 
 def assert_frozen_stage4_sources():
@@ -171,16 +196,296 @@ def assert_zero_speed_joint_evaluator():
     )
 
 
-def assert_stage5a_only_scope():
+def assert_frozen_gnn_adapter():
+    assert hashlib.sha256(CHECKPOINT.read_bytes()).hexdigest() == (
+        EXPECTED_STAGE1C_CHECKPOINT_SHA256
+    )
+    assert hashlib.sha256((SOURCE / "model_2.py").read_bytes()).hexdigest() == (
+        EXPECTED_STAGE1C_MODEL_SHA256
+    )
+    model = load_frozen_model(
+        CHECKPOINT,
+        antennas=2,
+        pmax_w=PMAX_W,
+        device=torch.device("cpu"),
+    )
+    assert not model.training
+    assert not any(parameter.requires_grad for parameter in model.parameters())
+
+    loader = MobilityEnvironment(
+        2,
+        2,
+        episode_steps=2,
+        speed_kmh=30,
+        seed=23,
+        bs_locations=AP_COORDINATES,
+    ).generate_trajectories(NUM_USERS, 0.1)
+    scores = np.square(loader.path_loss_factors[:, 0]).transpose(0, 2, 1)
+    mask = top_l_mask(scores)
+    stored = loader.true_channels[:, 0].copy()
+    actual = format_gnn_inputs(stored, mask, torch.device("cpu"))
+    expected = loader._format_frames(stored, mask)
+    assert torch.equal(actual[0], expected[0])
+    assert np.array_equal(actual[1], expected[1])
+    assert all(torch.equal(a, b) for a, b in zip(actual[2], expected[2]))
+    assert all(np.array_equal(a, b) for a, b in zip(actual[3], expected[3]))
+
+    perturbed = stored.copy()
+    perturbed[~mask.transpose(0, 2, 1)] = 1e12 + 1e12j
+    with torch.inference_mode():
+        for beamformer in BEAMFORMERS[1:]:
+            weights = make_beamformer(
+                stored,
+                mask,
+                beamformer,
+                pmax_w=PMAX_W,
+                noise_power=1e-12,
+                device=torch.device("cpu"),
+                model=model,
+            )
+            batched = make_beamformer(
+                stored,
+                mask,
+                beamformer,
+                pmax_w=PMAX_W,
+                noise_power=1e-12,
+                device=torch.device("cpu"),
+                model=model,
+                batched_gnn=True,
+            )
+            reference = model(
+                actual[0] if beamformer == "centralized_gnn" else actual[2],
+                actual[1] if beamformer == "centralized_gnn" else actual[3],
+                training=beamformer == "centralized_gnn",
+                duplicate=False,
+            )
+            one_at_a_time = torch.cat(
+                [
+                    make_beamformer(
+                        stored[index:index + 1],
+                        mask[index:index + 1],
+                        beamformer,
+                        pmax_w=PMAX_W,
+                        noise_power=1e-12,
+                        device=torch.device("cpu"),
+                        model=model,
+                    )
+                    for index in range(len(stored))
+                ]
+            )
+            hidden_perturbed = make_beamformer(
+                perturbed,
+                mask,
+                beamformer,
+                pmax_w=PMAX_W,
+                noise_power=1e-12,
+                device=torch.device("cpu"),
+                model=model,
+            )
+            assert torch.equal(weights, reference)
+            assert torch.equal(weights, one_at_a_time)
+            assert torch.allclose(weights, batched, rtol=1e-6, atol=5e-7)
+            assert torch.equal(weights, hidden_perturbed)
+            finite, max_unassociated, max_power = beamformer_checks(
+                weights, mask, NUM_USERS, PMAX_W
+            )
+            assert finite
+            assert max_unassociated == 0
+            assert max_power <= PMAX_W + 1e-6
+
+
+def assert_frozen_gnn_stored_csi_smoke():
+    loader = MobilityEnvironment(
+        2,
+        2,
+        episode_steps=100,
+        speed_kmh=30,
+        seed=29,
+        bs_locations=AP_COORDINATES,
+    ).generate_trajectories(NUM_USERS, 0.1)
+    _, _, trace = build_modular_trace(loader.path_loss_factors, H3)
+    args = SimpleNamespace(
+        K=NUM_USERS,
+        episode_steps=100,
+        eval_time_stride=25,
+        pmax_dbm=15.0,
+        noise_power=1e-12,
+        batch_size=8,
+    )
+    model = load_frozen_model(
+        CHECKPOINT,
+        antennas=2,
+        pmax_w=PMAX_W,
+        device=torch.device("cpu"),
+    )
+    result = simulate_cell(
+        loader,
+        trace,
+        {
+            "association": H3,
+            "scheduler": "mobility_age_priority",
+            "budget": 2,
+            "role": "gate5_5_smoke",
+            "label": "gate5_5_smoke",
+        },
+        args,
+        torch.device("cpu"),
+        model=model,
+        beamformers=BEAMFORMERS,
+    )
+    assert result["summary"]["constraints_passed"]
+    assert set(result["rates"]) == set(BEAMFORMERS)
+    assert np.all(result["updates"][:, 1:].sum(axis=-1) <= 2)
+    for rate in result["rates"].values():
+        assert rate["finite"]
+        assert np.isfinite(rate["trajectory_sum_rates"]).all()
+
+
+def assert_gate5_5_scope():
     combined = "\n".join(
         (SOURCE / filename).read_text()
-        for filename in ("association.py", "feedback.py", "controller.py", "evaluate.py")
+        for filename in (
+            "association.py",
+            "feedback.py",
+            "controller.py",
+            "model_2.py",
+            "evaluate.py",
+        )
     )
     assert "torch.optim" not in combined
+    assert (SOURCE / "model_2.py").is_file()
+    assert (SOURCE / "run_stage5b.sh").is_file()
     assert not any(
         (SOURCE / filename).exists()
-        for filename in ("model_joint.py", "train_joint.py", "run_stage5b.sh")
+        for filename in ("model_joint.py", "train_joint.py")
     )
+
+
+def rl_episode(seed=31):
+    loader = MobilityEnvironment(
+        2,
+        1,
+        episode_steps=100,
+        speed_kmh=30,
+        seed=seed,
+        bs_locations=AP_COORDINATES,
+    ).generate_trajectories(NUM_USERS, 0.1)
+    return JointEpisode(
+        true_channels=loader.true_channels[0].copy(),
+        lsf_power=np.square(loader.path_loss_factors[0]),
+        rhos=loader.rhos[0].copy(),
+        speed_kmh=30,
+        seed=seed,
+    )
+
+
+def assert_ap_local_actor_and_fixed_action_contract():
+    torch.manual_seed(37)
+    actor = LocalActor().eval()
+    observations = torch.zeros(1, NUM_AP, LOCAL_OBSERVATION_DIM)
+    changed = observations.clone()
+    changed[:, 2] = 1
+    with torch.inference_mode():
+        actions, _ = actor.sample(observations, deterministic=True)
+        changed_actions, _ = actor.sample(changed, deterministic=True)
+    assert actions.shape == (1, NUM_AP, LOCAL_ACTION_DIM)
+    assert torch.equal(actions[:, :2], changed_actions[:, :2])
+    assert not torch.equal(actions[:, 2], changed_actions[:, 2])
+    assert torch.equal(actions[:, 3:], changed_actions[:, 3:])
+    assert not hasattr(actor, "actors")
+
+
+def assert_rl_no_leakage_projection_and_constraints():
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    episode = rl_episode()
+    first = JointControlEnvironment(
+        episode,
+        "rzf",
+        model=None,
+        device=device,
+        pmax_w=PMAX_W,
+        noise_power=1e-12,
+    )
+    observation = first.reset()
+    actor = LocalActor().to(device).eval()
+    with torch.inference_mode():
+        actions, _ = actor.sample(
+            torch.from_numpy(observation).to(device).unsqueeze(0),
+            deterministic=True,
+        )
+    actions = actions[0].cpu().numpy()
+    next_observation, _, _, info = first.step(actions)
+    assert info["constraints_passed"]
+    assert np.all(info["association"].sum(axis=-1) == 2)
+    assert np.all(info["updates"][1:].sum(axis=-1) <= 2)
+
+    hidden = deepcopy(episode)
+    hidden.true_channels[1:50][~info["updates"][1:]] = 1e12 + 1e12j
+    second = JointControlEnvironment(
+        hidden,
+        "rzf",
+        model=None,
+        device=device,
+        pmax_w=PMAX_W,
+        noise_power=1e-12,
+    )
+    second_observation = second.reset()
+    second_next, _, _, second_info = second.step(actions)
+    assert np.array_equal(observation, second_observation)
+    assert np.array_equal(info["association"], second_info["association"])
+    assert np.array_equal(info["updates"], second_info["updates"])
+    assert np.array_equal(next_observation, second_next)
+
+    with torch.inference_mode():
+        next_actions, _ = actor.sample(
+            torch.from_numpy(next_observation).to(device).unsqueeze(0),
+            deterministic=True,
+        )
+    _, _, done, next_info = first.step(next_actions[0].cpu().numpy())
+    assert done
+    assert next_info["constraints_passed"]
+    assert np.all(next_info["association"].sum(axis=-1) == 2)
+    evaluation = evaluate_policy(
+        actor,
+        [episode],
+        "rzf",
+        model=None,
+        device=device,
+        pmax_w=PMAX_W,
+        noise_power=1e-12,
+    )
+    metrics = evaluation["per_trajectory"]
+    assert metrics["association_bid_messages"][0] == 2 * NUM_AP * NUM_USERS
+    assert metrics["association_bid_messages_per_ue_s"][0] == 100
+
+
+def assert_replay_twin_critic_and_finite_update():
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    rng = np.random.default_rng(41)
+    replay = ReplayBuffer(16, 41)
+    for _ in range(8):
+        observation = rng.normal(
+            size=(NUM_AP, LOCAL_OBSERVATION_DIM)
+        ).astype(np.float32)
+        action = rng.uniform(
+            -1, 1, size=(NUM_AP, LOCAL_ACTION_DIM)
+        ).astype(np.float32)
+        replay.add(observation, action, 1.0, observation * 0.9, False)
+    trainer = SACTrainer(device)
+    metrics = trainer.update(replay, 8)
+    assert all(np.isfinite(value) for value in metrics.values())
+    assert trainer.critic.q1 is not trainer.critic.q2
+
+
+def assert_minimal_rl_scope():
+    combined = "\n".join(
+        (SOURCE / filename).read_text()
+        for filename in ("rl_core.py", "train_rl.py", "evaluate_rl.py")
+    ).lower()
+    assert "lstm" not in combined
+    assert "gru" not in combined
+    assert "graphconv" not in combined
+    assert "torch_geometric" not in combined
 
 
 def assert_parent_native_boundary_devices():
@@ -197,7 +502,13 @@ def main():
     assert_priority_and_no_true_csi_leakage()
     assert_ap_local_bids_and_ue_arbitration_boundary()
     assert_zero_speed_joint_evaluator()
-    assert_stage5a_only_scope()
+    assert_frozen_gnn_adapter()
+    assert_frozen_gnn_stored_csi_smoke()
+    assert_gate5_5_scope()
+    assert_ap_local_actor_and_fixed_action_contract()
+    assert_rl_no_leakage_projection_and_constraints()
+    assert_replay_twin_critic_and_finite_update()
+    assert_minimal_rl_scope()
     assert_parent_native_boundary_devices()
     print("Stage 5 dynamic CSI, causality, locality, boundary, and constraint checks passed.")
 
