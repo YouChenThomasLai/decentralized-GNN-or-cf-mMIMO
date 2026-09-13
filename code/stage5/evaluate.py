@@ -13,6 +13,7 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from association import ASSOCIATION_PERIOD_FRAMES, TOP_L, switching_metrics
 from controller import (
@@ -26,6 +27,7 @@ from controller import (
 )
 from environment import MOBILITY_STRAIGHT, TOPOLOGY_TYPE, WRAP_AROUND, MobilityEnvironment
 from feedback import SCHEDULERS, FeedbackState
+from model_2 import node_update
 from utils_return_indivial_rates import (
     HEIGHT_DIFFERENCE,
     SQUARE_SIDE,
@@ -35,6 +37,8 @@ from utils_return_indivial_rates import (
 
 
 NUM_AP = 5
+BEAMFORMERS = ("rzf", "centralized_gnn", "decentralized_gnn")
+GNN_BEAMFORMERS = BEAMFORMERS[1:]
 LAMBDA_SWITCH = 0.5
 RTOL = 1e-6
 ATOL = 1e-8
@@ -44,9 +48,11 @@ SOURCE_FILES = (
     "association.py",
     "feedback.py",
     "controller.py",
+    "model_2.py",
     "evaluate.py",
     "test_stage5.py",
     "run_exp-v5.sh",
+    "run_stage5b.sh",
 )
 EXPECTED_STAGE4_SOURCE_SHA256 = {
     "environment.py": "1416de41ccd87983c8d9f0a9d0d3c9b22c7b29c026a3830523701c6726c2ba6e",
@@ -64,6 +70,12 @@ EXPECTED_STAGE1C_AP_SHA256 = (
 )
 EXPECTED_STAGE1C_CONFIG_SHA256 = (
     "ace7fbe95ab86dab070de0a04b7517edd1924af1271446fc69d94e72cd98cf0b"
+)
+EXPECTED_STAGE1C_CHECKPOINT_SHA256 = (
+    "16dba87572cd9f9dfc3272b4faeda2d7127dc414945450b856758efdba7bba45"
+)
+EXPECTED_STAGE1C_MODEL_SHA256 = (
+    "d916ebd5bcf4077b0ff6c9887d84aaf0d1eee30088d5720f8e770b9036225869"
 )
 
 
@@ -106,6 +118,134 @@ def evaluation_device(specification, default_device, stage4_boundary_device=None
     if specification["role"] == "stage4_boundary" and stage4_boundary_device:
         return torch.device(stage4_boundary_device)
     return torch.device(default_device)
+
+
+def load_frozen_model(checkpoint, *, antennas, pmax_w, device):
+    model = node_update(antennas, 6, pmax_w, 64, NUM_AP, device).to(device)
+    state_dict = torch.load(checkpoint, map_location=device, weights_only=True)
+    model.load_state_dict(state_dict)
+    model.requires_grad_(False)
+    model.eval()
+    return model
+
+
+def format_gnn_inputs(stored_channels, association_mask, device):
+    stored = np.asarray(stored_channels)
+    association = np.asarray(association_mask, dtype=bool)
+    if stored.ndim != 4:
+        raise ValueError("Stored CSI must have shape [B,A,K,M]")
+    if association.shape != (stored.shape[0], stored.shape[2], stored.shape[1]):
+        raise ValueError("Association mask must have shape [B,K,A]")
+    if not np.isfinite(stored).all():
+        raise ValueError("Stored CSI must be finite")
+
+    features = np.concatenate((stored.real, stored.imag), axis=-1)
+    ap_mask = association.transpose(0, 2, 1)
+    features = (features * ap_mask[..., None]).astype(np.float32)
+    local = [
+        F.normalize(torch.from_numpy(features[:, ap]).unsqueeze(1), dim=2).to(device)
+        for ap in range(stored.shape[1])
+    ]
+    return (
+        torch.cat(local, dim=2),
+        ap_mask.reshape(stored.shape[0], -1),
+        local,
+        [association[:, :, ap] for ap in range(stored.shape[1])],
+    )
+
+
+def centralized_gnn_beamformer(model, user_feature, user_index):
+    """Evaluate the frozen centralized GNN over the full frame batch."""
+    num_users = user_feature.shape[2] // model.AP
+    encoded = model._encode(user_feature)
+    raw_weights = model.BS_readout(encoded)
+    mask = torch.as_tensor(
+        user_index, dtype=torch.bool, device=raw_weights.device
+    )
+    blocks = []
+    for ap in range(model.AP):
+        start = ap * num_users
+        stop = (ap + 1) * num_users
+        block = raw_weights[:, :, start:stop]
+        block = block * mask[:, None, start:stop]
+        coefficient = model.AP_coeff_NN_list[ap](encoded)
+        blocks.append(model._normalize_block(block, coefficient))
+    return torch.cat(blocks, dim=2)
+
+
+def decentralized_gnn_beamformer(model, user_feature, user_index):
+    """Evaluate every frozen AP-local GNN view in one tensor batch."""
+    num_ap = len(user_feature)
+    batch_size = user_feature[0].shape[0]
+    num_users = user_feature[0].shape[2]
+    all_features = torch.cat(user_feature, dim=2)
+    masks = torch.as_tensor(
+        np.stack(user_index, axis=1),
+        dtype=torch.bool,
+        device=all_features.device,
+    )
+    visible = masks[:, :, None, :] & masks[:, None, :, :]
+    local_features = all_features[:, None].expand(-1, num_ap, -1, -1, -1)
+    local_features = local_features.reshape(
+        batch_size * num_ap,
+        1,
+        num_ap * num_users,
+        all_features.shape[-1],
+    )
+    local_features = local_features * visible.reshape(
+        batch_size * num_ap, 1, num_ap * num_users, 1
+    )
+    encoded = model._encode(local_features).reshape(
+        batch_size, num_ap, num_ap * num_users, -1
+    )
+    raw_weights = model.BS_readout(
+        encoded.reshape(batch_size * num_ap, num_ap * num_users, -1)
+    ).reshape(batch_size, num_ap, 2 * model.M, num_ap * num_users)
+    blocks = []
+    for ap in range(num_ap):
+        start = ap * num_users
+        stop = (ap + 1) * num_users
+        block = raw_weights[:, ap, :, start:stop]
+        block = block * masks[:, ap, None, :]
+        coefficient = model.AP_coeff_NN_list[ap](encoded[:, ap])
+        blocks.append(model._normalize_block(block, coefficient))
+    return torch.cat(blocks, dim=2)
+
+
+def make_beamformer(
+    stored_channels,
+    association_mask,
+    beamformer,
+    *,
+    pmax_w,
+    noise_power,
+    device,
+    model=None,
+    batched_gnn=False,
+):
+    if beamformer == "rzf":
+        return rzf_beamforming(
+            stored_channels, association_mask, pmax_w, device, noise_power
+        )
+    if beamformer not in GNN_BEAMFORMERS:
+        raise ValueError(f"Unknown beamformer: {beamformer}")
+    if model is None:
+        raise ValueError("GNN beamforming requires a frozen model")
+    if model.training or any(
+        parameter.requires_grad for parameter in model.parameters()
+    ):
+        raise RuntimeError("Stage 5B requires an eval-mode frozen GNN")
+
+    central, central_mask, local, local_masks = format_gnn_inputs(
+        stored_channels, association_mask, device
+    )
+    if beamformer == "centralized_gnn":
+        if batched_gnn:
+            return centralized_gnn_beamformer(model, central, central_mask)
+        return model(central, central_mask, training=True, duplicate=False)
+    if batched_gnn:
+        return decentralized_gnn_beamformer(model, local, local_masks)
+    return model(local, local_masks, training=False, duplicate=False)
 
 
 def save_provenance(out_dir, args):
@@ -153,6 +293,34 @@ def save_provenance(out_dir, args):
             "raw_metrics.npz": sha256(stage3_setting / "raw_metrics.npz"),
         },
     }
+    if any(method in GNN_BEAMFORMERS for method in args.beamformers):
+        inputs["stage1_checkpoint"] = str(args.checkpoint)
+        inputs["stage1_checkpoint_sha256"] = sha256(args.checkpoint)
+    if args.stage3_gnn_reference:
+        reference = Path(args.stage3_gnn_reference)
+        inputs["stage3_gnn_reference"] = str(reference)
+        inputs["stage3_gnn_reference_sha256"] = {
+            name: sha256(reference / name)
+            for name in (
+                "completion.json",
+                "provenance.json",
+                "association_traces.npz",
+                "raw_metrics.npz",
+            )
+        }
+    if args.stage5a_reference:
+        reference = Path(args.stage5a_reference)
+        inputs["stage5a_reference"] = str(reference)
+        inputs["stage5a_reference_sha256"] = {
+            name: sha256(reference / name)
+            for name in (
+                "completion.json",
+                "association_traces.npz",
+                "update_traces.npz",
+                "csi_state_metrics.npz",
+                "raw_metrics.npz",
+            )
+        }
     if args.boundary_reference:
         boundary = Path(args.boundary_reference)
         inputs["boundary_reference"] = str(boundary)
@@ -205,6 +373,14 @@ def validate_handoffs(args, provenance):
     for name, expected in expected_artifacts.items():
         if stage4_provenance.get(name) != expected or provenance.get(name) != expected:
             raise RuntimeError(f"Frozen artifact hash mismatch: {name}")
+    if any(method in GNN_BEAMFORMERS for method in args.beamformers):
+        checkpoint_hash = provenance["input_artifacts"].get(
+            "stage1_checkpoint_sha256"
+        )
+        if checkpoint_hash != EXPECTED_STAGE1C_CHECKPOINT_SHA256:
+            raise RuntimeError("Frozen Stage 1C checkpoint hash mismatch")
+        if provenance["source_sha256"].get("model_2.py") != EXPECTED_STAGE1C_MODEL_SHA256:
+            raise RuntimeError("Frozen Stage 1C model source hash mismatch")
 
     cli = stage4_config["cli"]
     fields = {
@@ -317,6 +493,14 @@ def main_cells(include_learned):
     return cells
 
 
+def gnn_qualification_cells():
+    return [
+        cell(FIXED_TOP2, "round_robin", 2, "simple_control"),
+        cell(H3, "mobility_age_priority", 2, "matching_no_rl"),
+        cell(H3, "round_robin", 8, "information_anchor"),
+    ]
+
+
 def cell(association, scheduler, budget, role):
     return {
         "label": f"{association}__{scheduler}__B{budget}",
@@ -354,7 +538,11 @@ def evaluate_rates(
     noise_power,
     device,
     frame_batch_size,
+    beamformer="rzf",
+    model=None,
 ):
+    if beamformer not in BEAMFORMERS:
+        raise ValueError(f"Unknown beamformer: {beamformer}")
     trajectories = stored_channels.shape[0]
     trajectory_indices = np.repeat(np.arange(trajectories), len(time_indices))
     frame_indices = np.tile(time_indices, trajectories)
@@ -374,7 +562,15 @@ def evaluate_rates(
             current = true_channels[trajectory_batch, time_batch]
             masks = association_masks[trajectory_batch, time_batch]
             construction_start = time.perf_counter()
-            weights = rzf_beamforming(stored, masks, pmax_w, device, noise_power)
+            weights = make_beamformer(
+                stored,
+                masks,
+                beamformer,
+                pmax_w=pmax_w,
+                noise_power=noise_power,
+                device=device,
+                model=model,
+            )
             construction_s += time.perf_counter() - construction_start
             checks = beamformer_checks(weights, masks, num_users, pmax_w)
             finite &= checks[0]
@@ -400,13 +596,24 @@ def evaluate_rates(
         "constraints_passed": bool(
             finite and max_unassociated == 0 and max_power <= pmax_w + 1e-6
         ),
-        "rzf_construction_s": construction_s,
+        "beamformer": beamformer,
+        "construction_s": construction_s,
         "total_evaluation_s": time.perf_counter() - total_start,
         "beamformer_sha256": weight_digest.hexdigest(),
     }
 
 
-def simulate_cell(loader, association_trace, specification, args, device, reference_indices=None):
+def simulate_cell(
+    loader,
+    association_trace,
+    specification,
+    args,
+    device,
+    reference_indices=None,
+    *,
+    model=None,
+    beamformers=("rzf",),
+):
     true_channels = loader.true_channels
     active_frames = expand_trace(association_trace, loader.episode_steps)
     active_ap_user = active_frames.transpose(0, 1, 3, 2)
@@ -446,30 +653,44 @@ def simulate_cell(loader, association_trace, specification, args, device, refere
 
     time_indices = np.arange(0, loader.episode_steps, args.eval_time_stride)
     pmax_w = 10 ** ((args.pmax_dbm - 30) / 10)
-    rate = evaluate_rates(
-        stored,
-        true_channels,
-        active_frames,
-        time_indices,
-        num_users=args.K,
-        pmax_w=pmax_w,
-        noise_power=args.noise_power,
-        device=device,
-        frame_batch_size=args.batch_size,
-    )
-    reference_rate = None
-    if reference_indices is not None:
-        reference_rate = evaluate_rates(
+    beamformers = tuple(beamformers)
+    if not beamformers or set(beamformers) - set(BEAMFORMERS):
+        raise ValueError("At least one known beamformer is required")
+    rates = {
+        beamformer: evaluate_rates(
             stored,
             true_channels,
             active_frames,
-            reference_indices,
+            time_indices,
             num_users=args.K,
             pmax_w=pmax_w,
             noise_power=args.noise_power,
             device=device,
             frame_batch_size=args.batch_size,
+            beamformer=beamformer,
+            model=model,
         )
+        for beamformer in beamformers
+    }
+    rate = rates[beamformers[0]]
+    reference_rates = None
+    if reference_indices is not None:
+        reference_rates = {
+            beamformer: evaluate_rates(
+                stored,
+                true_channels,
+                active_frames,
+                reference_indices,
+                num_users=args.K,
+                pmax_w=pmax_w,
+                noise_power=args.noise_power,
+                device=device,
+                frame_batch_size=args.batch_size,
+                beamformer=beamformer,
+                model=model,
+            )
+            for beamformer in beamformers
+        }
 
     steady_updates = updates[:, 1:]
     steady_active = active_ap_user[:, 1:]
@@ -514,7 +735,7 @@ def simulate_cell(loader, association_trace, specification, args, device, refere
     )
     all_active_ages = ages[active_ap_user]
     constraints_passed = bool(
-        rate["constraints_passed"]
+        all(item["constraints_passed"] for item in rates.values())
         and budget_violations == fill_violations == mask_violations == 0
         and cardinality_violations == 0
         and np.all(ages >= 0)
@@ -522,6 +743,24 @@ def simulate_cell(loader, association_trace, specification, args, device, refere
     )
     summary = {
         **specification,
+        "primary_beamformer": beamformers[0],
+        "beamformers": {
+            name: {
+                "trajectory_average_sum_rate": float(
+                    item["trajectory_sum_rates"].mean()
+                ),
+                "trajectory_average_p05_user_rate": float(
+                    item["trajectory_p05_user_rate"].mean()
+                ),
+                "finite": item["finite"],
+                "max_unassociated_abs": item["max_unassociated_abs"],
+                "max_ap_power_w": item["max_ap_power_w"],
+                "constraints_passed": item["constraints_passed"],
+                "construction_s": item["construction_s"],
+                "total_evaluation_s": item["total_evaluation_s"],
+            }
+            for name, item in rates.items()
+        },
         "trajectory_average_sum_rate": float(rate["trajectory_sum_rates"].mean()),
         "trajectory_average_p05_user_rate": float(rate["trajectory_p05_user_rate"].mean()),
         "actual_update_fraction": float(
@@ -542,11 +781,19 @@ def simulate_cell(loader, association_trace, specification, args, device, refere
         "fill_violations": fill_violations,
         "association_violations": mask_violations,
         "cardinality_violations": cardinality_violations,
-        "finite": bool(rate["finite"] and np.isfinite(nmse).all()),
-        "max_unassociated_abs": rate["max_unassociated_abs"],
-        "max_ap_power_w": rate["max_ap_power_w"],
+        "finite": bool(
+            all(item["finite"] for item in rates.values())
+            and np.isfinite(nmse).all()
+        ),
+        "max_unassociated_abs": max(
+            item["max_unassociated_abs"] for item in rates.values()
+        ),
+        "max_ap_power_w": max(item["max_ap_power_w"] for item in rates.values()),
         "constraints_passed": constraints_passed,
-        "rzf_construction_s": rate["rzf_construction_s"],
+        "beamformer_construction_s": rate["construction_s"],
+        "rzf_construction_s": (
+            rate["construction_s"] if beamformers[0] == "rzf" else None
+        ),
         "total_evaluation_s": rate["total_evaluation_s"],
     }
     return {
@@ -561,8 +808,15 @@ def simulate_cell(loader, association_trace, specification, args, device, refere
         "never_refreshed_per_trajectory": never_refreshed,
         "age_metrics": age_metrics,
         "rate": rate,
-        "reference_rate": reference_rate,
+        "rates": rates,
+        "reference_rate": (
+            reference_rates[beamformers[0]] if reference_rates is not None else None
+        ),
+        "reference_rates": reference_rates,
         "stored_sha256": hashlib.sha256(stored.tobytes()).hexdigest(),
+        "true_csi_sha256": hashlib.sha256(true_channels.tobytes()).hexdigest(),
+        "association_sha256": hashlib.sha256(active_frames.tobytes()).hexdigest(),
+        "updates_sha256": hashlib.sha256(updates.tobytes()).hexdigest(),
     }
 
 
@@ -675,6 +929,51 @@ def compare_stage3_boundary(result, association_trace, reference_setting):
     }
 
 
+def compare_stage3_gnn_boundary(result, association_trace, reference_setting):
+    policy = H3
+    checks = {}
+    max_abs_error = 0.0
+    with np.load(Path(reference_setting) / "association_traces.npz") as traces:
+        checks["association_trace"] = bool(
+            np.array_equal(association_trace, traces[f"{policy}__mask"])
+        )
+    with np.load(Path(reference_setting) / "raw_metrics.npz") as raw:
+        for beamformer in GNN_BEAMFORMERS:
+            if beamformer not in result["reference_rates"]:
+                checks[f"{beamformer}_present"] = False
+                continue
+            actual = result["reference_rates"][beamformer]
+            pairs = {
+                "sum_rate": (
+                    "trajectory_sum_rates",
+                    "per_trajectory_sum_rate",
+                ),
+                "user_rates": (
+                    "user_time_average_rates",
+                    "per_trajectory_user_time_average_rates",
+                ),
+                "p05_rate": (
+                    "trajectory_p05_user_rate",
+                    "per_trajectory_p05_user_rate",
+                ),
+            }
+            for name, (actual_key, expected_suffix) in pairs.items():
+                expected_key = f"{policy}__{beamformer}__{expected_suffix}"
+                expected = raw[expected_key]
+                values = actual[actual_key]
+                checks[f"{beamformer}_{name}"] = bool(
+                    np.allclose(values, expected, rtol=RTOL, atol=ATOL)
+                )
+                max_abs_error = max(
+                    max_abs_error, float(np.max(np.abs(values - expected)))
+                )
+    return {
+        "checks": checks,
+        "max_abs_error": max_abs_error,
+        "passed": all(checks.values()),
+    }
+
+
 def validate_boundary_reference(path):
     path = Path(path)
     completion = json.loads((path / "completion.json").read_text())
@@ -684,11 +983,72 @@ def validate_boundary_reference(path):
     return boundary
 
 
+def validate_stage5a_reference(path):
+    path = Path(path)
+    completion = json.loads((path / "completion.json").read_text())
+    if completion.get("status") != "complete":
+        raise RuntimeError(f"Stage 5A reference is incomplete: {path}")
+    return path
+
+
+def compare_stage5a_inputs(result, association_trace, reference, label):
+    checks = {}
+    with np.load(reference / "association_traces.npz") as traces:
+        key = f"{result['summary']['association']}__mask"
+        checks["association"] = bool(
+            np.array_equal(association_trace, traces[key])
+        )
+    with np.load(reference / "update_traces.npz") as updates:
+        checks["updates"] = bool(
+            np.array_equal(result["updates"], updates[f"{label}__update_mask"])
+        )
+        checks["ages"] = bool(
+            np.array_equal(
+                result["ages"], updates[f"{label}__candidate_link_age"]
+            )
+        )
+    with np.load(reference / "csi_state_metrics.npz") as csi:
+        checks["stored_csi"] = bool(
+            np.array_equal(result["stored"], csi[f"{label}__stored_csi_rzf_input"])
+        )
+    with np.load(reference / "raw_metrics.npz") as raw:
+        rzf = result["rates"]["rzf"]
+        pairs = {
+            "rzf_sum_rate": (
+                rzf["trajectory_sum_rates"],
+                raw[f"{label}__per_trajectory_sum_rate"],
+            ),
+            "rzf_user_rates": (
+                rzf["user_time_average_rates"],
+                raw[f"{label}__per_trajectory_user_time_average_rates"],
+            ),
+            "rzf_p05_rate": (
+                rzf["trajectory_p05_user_rate"],
+                raw[f"{label}__per_trajectory_p05_user_rate"],
+            ),
+        }
+        for name, (actual, expected) in pairs.items():
+            checks[name] = bool(
+                np.allclose(actual, expected, rtol=RTOL, atol=ATOL)
+            )
+    return {
+        "checks": checks,
+        "stored_csi_sha256": result["stored_sha256"],
+        "true_csi_sha256": result["true_csi_sha256"],
+        "association_sha256": result["association_sha256"],
+        "updates_sha256": result["updates_sha256"],
+        "passed": all(checks.values()),
+    }
+
+
 def store_result(result, label, update_artifacts, csi_artifacts, raw_artifacts):
     update_artifacts[f"{label}__update_mask"] = result["updates"]
     update_artifacts[f"{label}__candidate_link_age"] = result["ages"]
     update_artifacts[f"{label}__scheduler_priority"] = result["priorities"]
-    csi_artifacts[f"{label}__stored_csi_rzf_input"] = result["stored"]
+    if tuple(result["rates"]) == ("rzf",):
+        csi_artifacts[f"{label}__stored_csi_rzf_input"] = result["stored"]
+    else:
+        csi_artifacts[f"{label}__stored_csi_beamformer_input"] = result["stored"]
     csi_artifacts[f"{label}__csi_nmse_by_trajectory_frame"] = result["nmse"]
     csi_artifacts[f"{label}__actual_update_fraction_per_trajectory"] = result[
         "actual_fraction_per_trajectory"
@@ -712,9 +1072,43 @@ def store_result(result, label, update_artifacts, csi_artifacts, raw_artifacts):
     raw_artifacts[f"{label}__stored_csi_sha256"] = np.asarray(
         result["stored_sha256"]
     )
-    raw_artifacts[f"{label}__rzf_sha256"] = np.asarray(
-        rate["beamformer_sha256"]
+    raw_artifacts[f"{label}__true_csi_sha256"] = np.asarray(
+        result["true_csi_sha256"]
     )
+    raw_artifacts[f"{label}__association_sha256"] = np.asarray(
+        result["association_sha256"]
+    )
+    raw_artifacts[f"{label}__updates_sha256"] = np.asarray(
+        result["updates_sha256"]
+    )
+    for beamformer, values in result["rates"].items():
+        prefix = f"{label}__{beamformer}"
+        raw_artifacts[f"{prefix}__per_trajectory_sum_rate"] = values[
+            "trajectory_sum_rates"
+        ]
+        raw_artifacts[f"{prefix}__per_trajectory_user_time_average_rates"] = values[
+            "user_time_average_rates"
+        ]
+        raw_artifacts[f"{prefix}__per_trajectory_p05_user_rate"] = values[
+            "trajectory_p05_user_rate"
+        ]
+        raw_artifacts[f"{prefix}__finite"] = np.asarray(values["finite"])
+        raw_artifacts[f"{prefix}__max_unassociated_abs"] = np.asarray(
+            values["max_unassociated_abs"]
+        )
+        raw_artifacts[f"{prefix}__max_ap_power_w"] = np.asarray(
+            values["max_ap_power_w"]
+        )
+        raw_artifacts[f"{prefix}__constraints_passed"] = np.asarray(
+            values["constraints_passed"]
+        )
+        raw_artifacts[f"{prefix}__beamformer_sha256"] = np.asarray(
+            values["beamformer_sha256"]
+        )
+        if beamformer == "rzf":
+            raw_artifacts[f"{label}__rzf_sha256"] = np.asarray(
+                values["beamformer_sha256"]
+            )
 
 
 def run(args, out_dir, logger, provenance):
@@ -733,6 +1127,22 @@ def run(args, out_dir, logger, provenance):
     boundary_reference = (
         validate_boundary_reference(args.boundary_reference)
         if args.boundary_reference
+        else None
+    )
+    stage5a_reference = (
+        validate_stage5a_reference(args.stage5a_reference)
+        if args.stage5a_reference
+        else None
+    )
+    pmax_w = 10 ** ((args.pmax_dbm - 30) / 10)
+    model = (
+        load_frozen_model(
+            args.checkpoint,
+            antennas=args.M,
+            pmax_w=pmax_w,
+            device=device,
+        )
+        if any(method in GNN_BEAMFORMERS for method in args.beamformers)
         else None
     )
 
@@ -764,13 +1174,19 @@ def run(args, out_dir, logger, provenance):
         specifications = boundary_cells()
     elif args.phase == "main":
         specifications = main_cells(include_learned)
+    elif args.phase == "gnn":
+        specifications = gnn_qualification_cells()
     else:
         specifications = boundary_cells() + main_cells(include_learned)
         specifications = list({item["label"]: item for item in specifications}.values())
 
     config = {
-        "stage": "5A",
-        "execution_mode": "joint_dynamic_association_causal_feedback_evaluation",
+        "stage": "5B-gate5.5" if args.phase == "gnn" else "5A",
+        "execution_mode": (
+            "frozen_gnn_stored_csi_qualification"
+            if args.phase == "gnn"
+            else "joint_dynamic_association_causal_feedback_evaluation"
+        ),
         "phase": args.phase,
         "cli": vars(args),
         "effective_device": str(device),
@@ -785,9 +1201,10 @@ def run(args, out_dir, logger, provenance):
         "all_link_bootstrap_cost_per_trajectory": NUM_AP * args.K,
         "all_link_bootstrap_excluded_from_steady_budget": True,
         "current_lsf_assumption": "AP-local slow-timescale measurement outside the instantaneous small-scale CSI budget",
-        "action_order": "association bids; UE top-2 arbitration; feedback selection; selected CSI reveal; stored-CSI RZF; true-CSI rate",
+        "action_order": "association bids; UE top-2 arbitration; feedback selection; selected CSI reveal; stored-CSI beamformer; true-CSI rate",
         "arbitration": "one AP message with K scalar bids per AP and association epoch; stable AP-index tie break",
-        "beamformer": "rzf_stored_csi_rate_true_csi",
+        "beamformers": list(args.beamformers),
+        "frozen_gnn": model is not None,
         "rate_retention_reference": f"{H3}__round_robin__B8",
         "lambda_switch": LAMBDA_SWITCH,
         "cells": specifications,
@@ -883,11 +1300,13 @@ def run(args, out_dir, logger, provenance):
         )
     }
     results = {}
+    stage5a_input_checks = {}
     boundary = {
         "parent_compatible": compatibility["both"],
         "environment_reproduced": environment_reproduced,
         "stage4_cells": {},
         "stage3_h3_b8": None,
+        "stage3_gnn_h3_b8": None,
         "stationary_h3_zero_switch": None,
         "stationary_h3_b0_equals_b8": None,
     }
@@ -902,7 +1321,12 @@ def run(args, out_dir, logger, provenance):
             and specification["budget"] == args.K
             and compatibility["stage3"]
         ):
-            with np.load(stage3_setting / "raw_metrics.npz") as frozen:
+            reference_setting = (
+                Path(args.stage3_gnn_reference)
+                if args.stage3_gnn_reference
+                else stage3_setting
+            )
+            with np.load(reference_setting / "raw_metrics.npz") as frozen:
                 reference_indices = frozen["evaluation_time_indices"].copy()
         result = simulate_cell(
             loader,
@@ -911,16 +1335,39 @@ def run(args, out_dir, logger, provenance):
             args,
             evaluation_device(specification, device, stage4_boundary_device),
             reference_indices,
+            model=model,
+            beamformers=args.beamformers,
         )
         results[label] = result
         store_result(result, label, update_artifacts, csi_artifacts, raw_artifacts)
+        if stage5a_reference is not None:
+            stage5a_input_checks[label] = compare_stage5a_inputs(
+                result,
+                trace_cache[specification["association"]],
+                stage5a_reference,
+                label,
+            )
 
         if specification["role"] == "stage4_boundary" and compatibility["stage4"]:
             check = compare_stage4_boundary(result, specification, args.stage4_reference)
             boundary["stage4_cells"][label] = check
-        if specification["role"] in ("stage3_boundary", "anchor") and specification["budget"] == args.K and compatibility["stage3"]:
+        if (
+            specification["role"] in ("stage3_boundary", "anchor")
+            and specification["budget"] == args.K
+            and compatibility["stage3"]
+        ):
             boundary["stage3_h3_b8"] = compare_stage3_boundary(
                 result, trace_cache[H3], stage3_setting
+            )
+        if (
+            args.phase == "gnn"
+            and specification["association"] == H3
+            and specification["budget"] == args.K
+        ):
+            boundary["stage3_gnn_h3_b8"] = compare_stage3_gnn_boundary(
+                result,
+                trace_cache[H3],
+                args.stage3_gnn_reference,
             )
 
         if args.phase == "all" and index == len(boundary_cells()) - 1:
@@ -947,19 +1394,42 @@ def run(args, out_dir, logger, provenance):
                 atol=ATOL,
             )
         )
-    boundary["passed"] = (
-        bool(boundary_reference["passed"])
-        if args.phase == "main"
-        else boundary_passed(boundary, results, trace_cache, args)
-    )
+    if args.phase == "main":
+        boundary["passed"] = bool(boundary_reference["passed"])
+    elif args.phase == "gnn":
+        boundary["passed"] = bool(
+            stage5a_input_checks
+            and all(item["passed"] for item in stage5a_input_checks.values())
+            and boundary["stage3_gnn_h3_b8"]
+            and boundary["stage3_gnn_h3_b8"]["passed"]
+        )
+    else:
+        boundary["passed"] = boundary_passed(boundary, results, trace_cache, args)
     write_json(out_dir / "boundary_summary.json", boundary)
 
     if h3_b8 in results:
-        denominator = results[h3_b8]["rate"]["trajectory_sum_rates"]
-        for label, result in results.items():
-            retention = result["rate"]["trajectory_sum_rates"] / denominator
-            result["summary"]["mean_rate_retention_to_h3_b8"] = float(retention.mean())
-            raw_artifacts[f"{label}__per_trajectory_rate_retention_to_h3_b8"] = retention
+        for beamformer in args.beamformers:
+            denominator = results[h3_b8]["rates"][beamformer][
+                "trajectory_sum_rates"
+            ]
+            for label, result in results.items():
+                retention = (
+                    result["rates"][beamformer]["trajectory_sum_rates"]
+                    / denominator
+                )
+                result["summary"]["beamformers"][beamformer][
+                    "mean_rate_retention_to_h3_b8"
+                ] = float(retention.mean())
+                raw_artifacts[
+                    f"{label}__{beamformer}__per_trajectory_rate_retention_to_h3_b8"
+                ] = retention
+                if beamformer == result["summary"]["primary_beamformer"]:
+                    result["summary"]["mean_rate_retention_to_h3_b8"] = float(
+                        retention.mean()
+                    )
+                    raw_artifacts[
+                        f"{label}__per_trajectory_rate_retention_to_h3_b8"
+                    ] = retention
 
     for label, result in results.items():
         policy = result["summary"]["association"]
@@ -969,12 +1439,20 @@ def run(args, out_dir, logger, provenance):
             frame_period_s=args.decision_period_s,
         )["link_toggles_per_trajectory"]
         epochs = trace_cache[policy].shape[1]
-        utility = (
-            result["rate"]["trajectory_sum_rates"] / args.K
-            - LAMBDA_SWITCH * switch / (epochs * NUM_AP * args.K)
-        )
-        raw_artifacts[f"{label}__per_trajectory_utility"] = utility
-        result["summary"]["trajectory_average_utility"] = float(utility.mean())
+        for beamformer, rate in result["rates"].items():
+            utility = (
+                rate["trajectory_sum_rates"] / args.K
+                - LAMBDA_SWITCH * switch / (epochs * NUM_AP * args.K)
+            )
+            raw_artifacts[f"{label}__{beamformer}__per_trajectory_utility"] = utility
+            result["summary"]["beamformers"][beamformer][
+                "trajectory_average_utility"
+            ] = float(utility.mean())
+            if beamformer == result["summary"]["primary_beamformer"]:
+                raw_artifacts[f"{label}__per_trajectory_utility"] = utility
+                result["summary"]["trajectory_average_utility"] = float(
+                    utility.mean()
+                )
 
     primary_labels = {
         "fixed_rr": f"{FIXED_TOP2}__round_robin__B2",
@@ -1009,8 +1487,28 @@ def run(args, out_dir, logger, provenance):
     )
     checks = {
         "constraints": constraints_passed,
-        "boundary": boundary["passed"] if args.phase in ("boundary", "all") else True,
+        "boundary": (
+            boundary["passed"]
+            if args.phase in ("boundary", "all", "gnn")
+            else True
+        ),
         "boundary_reference": boundary_reference is not None if args.phase == "main" else True,
+        "stage5a_byte_identical_inputs": (
+            bool(
+                stage5a_input_checks
+                and all(item["passed"] for item in stage5a_input_checks.values())
+            )
+            if args.phase == "gnn"
+            else True
+        ),
+        "stage3_gnn_b8_reproduced": (
+            bool(
+                boundary["stage3_gnn_h3_b8"]
+                and boundary["stage3_gnn_h3_b8"]["passed"]
+            )
+            if args.phase == "gnn"
+            else True
+        ),
     }
     completed = all(checks.values())
     summary = {
@@ -1019,6 +1517,7 @@ def run(args, out_dir, logger, provenance):
         "association": association_summary,
         "cells": {label: result["summary"] for label, result in results.items()},
         "boundary": boundary,
+        "stage5a_input_checks": stage5a_input_checks,
         "interaction_difference_in_differences_mean": float(did.mean()) if did is not None else None,
         "signals": {
             "h3_nonzero_association_changes": h3_nonzero,
@@ -1106,6 +1605,39 @@ def aggregate_results(root, phase, boundary_root=None):
         )
         if not passed:
             raise RuntimeError("Stage 5 two-parent boundary failed")
+        return
+
+    if phase == "gnn":
+        checks = {
+            "all_settings_complete": len(settings) == 3,
+            "all_gate5_5_checks_passed": all(
+                summary["completed"] and all(summary["checks"].values())
+                for summary in settings.values()
+            ),
+            "beamformers_present": all(
+                all(
+                    set(cell_summary["beamformers"]) == set(BEAMFORMERS)
+                    for cell_summary in summary["cells"].values()
+                )
+                for summary in settings.values()
+            ),
+        }
+        completed = all(checks.values())
+        write_json(
+            root / "summary.json",
+            {
+                "phase": phase,
+                "settings": settings,
+                "checks": checks,
+                "completed": completed,
+            },
+        )
+        write_json(
+            root / "completion.json",
+            {"status": "complete" if completed else "failed_gate", "checks": checks},
+        )
+        if not completed:
+            raise RuntimeError("Stage 5B Gate 5.5 aggregation failed")
         return
 
     if boundary_root is None:
@@ -1238,11 +1770,14 @@ def parse_args():
     source = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description="Stage 5 joint association/feedback evaluator")
     parser.add_argument("--aggregate_root")
-    parser.add_argument("--phase", choices=("boundary", "main", "all"), default="all")
+    parser.add_argument(
+        "--phase", choices=("boundary", "main", "all", "gnn"), default="all"
+    )
     parser.add_argument("--boundary_root")
     parser.add_argument("--boundary_reference")
     parser.add_argument("--require_parent_reproduction", action="store_true")
     parser.add_argument("--learned_diagnostics", action="store_true")
+    parser.add_argument("--beamformers", nargs="+", choices=BEAMFORMERS)
     parser.add_argument("--M", type=int, default=2)
     parser.add_argument("--K", type=int, default=8)
     parser.add_argument("--pmax_dbm", type=float, default=15.0)
@@ -1256,6 +1791,9 @@ def parse_args():
     parser.add_argument("--eval_time_stride", type=int, default=1)
     parser.add_argument("--batch_size", type=int, default=256)
     stage1_run = default_stage1_run(source)
+    parser.add_argument(
+        "--checkpoint", default=str(stage1_run / "models/model_final_run0.pt")
+    )
     parser.add_argument("--ap_coordinates", default=str(stage1_run / "arrays/BS_0.txt"))
     parser.add_argument("--stage1_config", default=str(stage1_run / "config.json"))
     parser.add_argument("--stage4_reference")
@@ -1263,12 +1801,18 @@ def parse_args():
         "--stage3_reference_root",
         default=str(source.parent / "stage3/results_stage3b_seed0_dual_eval_straight"),
     )
+    parser.add_argument("--stage3_gnn_reference")
+    parser.add_argument("--stage5a_reference")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--stage4_boundary_device")
     parser.add_argument("--out_dir", default="results_stage5")
     args = parser.parse_args()
     if args.aggregate_root:
         return args
+    if args.beamformers is None:
+        args.beamformers = list(BEAMFORMERS if args.phase == "gnn" else ("rzf",))
+    if args.phase == "gnn" and tuple(args.beamformers) != BEAMFORMERS:
+        parser.error(f"Stage 5B Gate 5.5 requires beamformers: {BEAMFORMERS}")
     if args.M != 2 or args.K != 8:
         parser.error("Stage 5 contract fixes M=2 and K=8")
     if args.speed_kmh < 0:
@@ -1294,7 +1838,10 @@ def parse_args():
         args.stage4_reference = str(
             source.parent / "stage4/results_stage4_seed0" / setting_name(args.speed_kmh)
         )
-    for name in ("ap_coordinates", "stage1_config"):
+    artifact_names = ["ap_coordinates", "stage1_config"]
+    if any(method in GNN_BEAMFORMERS for method in args.beamformers):
+        artifact_names.append("checkpoint")
+    for name in artifact_names:
         path = Path(getattr(args, name)).expanduser().resolve()
         if not path.is_file():
             parser.error(f"{name} does not exist: {path}")
@@ -1323,6 +1870,38 @@ def parse_args():
         if not path.is_file():
             parser.error(f"Stage 3 artifact does not exist: {path}")
     args.stage3_reference_root = str(stage3_root)
+    if args.phase == "gnn":
+        if args.stage3_gnn_reference is None:
+            args.stage3_gnn_reference = str(
+                source.parent
+                / "stage3/results_stage3a_bpp"
+                / setting_name(args.speed_kmh)
+            )
+        if args.stage5a_reference is None:
+            args.stage5a_reference = str(
+                source / "results_stage5_seed0_rerun2" / setting_name(args.speed_kmh)
+            )
+        required = {
+            "stage3_gnn_reference": (
+                "completion.json",
+                "provenance.json",
+                "association_traces.npz",
+                "raw_metrics.npz",
+            ),
+            "stage5a_reference": (
+                "completion.json",
+                "association_traces.npz",
+                "update_traces.npz",
+                "csi_state_metrics.npz",
+                "raw_metrics.npz",
+            ),
+        }
+        for name, filenames in required.items():
+            path = Path(getattr(args, name)).expanduser().resolve()
+            for filename in filenames:
+                if not (path / filename).is_file():
+                    parser.error(f"{name} artifact does not exist: {path / filename}")
+            setattr(args, name, str(path))
     if args.boundary_reference:
         boundary = Path(args.boundary_reference).expanduser().resolve()
         for filename in ("completion.json", "boundary_summary.json"):

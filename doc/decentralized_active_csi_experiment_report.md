@@ -5,9 +5,9 @@
 - Origin Skill: academic-research-suite / experiment-agent
 - Origin Mode: validate（compacted evidence ledger）
 - Origin Date: 2026-08-18
-- Last Updated: 2026-08-28
-- Verification Status: ANALYZED（Stage 0–5A 已完成analysis；Stage 5B尚未實作或執行；目前沒有新版pipeline的獨立完整rerun或formal multi-seed inference）
-- Version Label: decentralized_active_csi_report_v18_compacted
+- Last Updated: 2026-08-30
+- Verification Status: ANALYZED（Stage 0–5B Gates 5.5–5.7與5-seed formal evaluation已完成；RL pipeline qualified，但learned performance為negative）
+- Version Label: decentralized_active_csi_report_v20_compacted
 - Plan: `doc/decentralized_active_csi_experiment_plan.md`
 - Active Detail: `doc/stage5_joint_decentralized_active_csi_experiment_plan.md`
 
@@ -15,7 +15,7 @@
 
 本文件只保存會影響後續研究決策的最小 evidence：frozen contract、gate verdict、handoff、主要trade-off與claim boundary。已完成stage的逐iteration、逐checkpoint、逐trajectory、重複sweep表與orchestration敘事已移除；需要重算或稽核時應讀raw artifacts，而不是從本文件還原數據。
 
-目前唯一active method-development工作是Stage 5B：先建立frozen centralized/decentralized GNN的B2/B8 baselines，再訓練RZF/C/D三個beamformer-matched AP-local policies。
+Stage 5B已完成matching RL qualification與5-seed formal evaluation；目前不再擴張此RL方法。
 
 ## 2. 狀態總表
 
@@ -29,7 +29,7 @@
 | 3 | PASS / learned negative | H3提供association signal；SAC不勝strong heuristics | 不再擴張Stage 3 learned association |
 | 4 | PASS | Stored-CSI、hard budget與B0/B8 boundaries正確；priority/RR trade-off成立 | Seed-0 scheduler handoff，不是superiority claim |
 | 5A | PASS | Joint causal evaluator與RZF modular matrix可用 | Seed-0 descriptive result |
-| 5B | NOT RUN | Frozen-GNN adapter與matching RL尚不存在 | 不得宣稱RL+GNN improvement |
+| 5B | Gates 5.5–5.7 PASS / learned negative | Frozen-GNN、RL pipeline與5-seed formal evaluation完成 | 實作qualified；RL不勝matching baseline |
 
 ## 3. Stage 0–1C baseline evidence
 
@@ -122,10 +122,10 @@ H3+priority是moving 2×2 cells中的最高mean-rate組合，但priority使H3的
 | Stage 3/4 parent boundaries可回復 | Supported on parent-native devices |
 | H3+priority為seed-0 RZF matrix最佳mean-rate cell | Descriptive only |
 | Priority改善每個UE/link或公平性 | Contradicted by tail/freshness diagnostics |
-| Frozen C/D GNN可在Stage 5 B2運作 | Unsupported；Gate 5.5未執行 |
-| AP-local RL改善frozen D-GNN或C-GNN | Unsupported；Gate 5.6未執行 |
+| Frozen C/D GNN可在Stage 5 B2運作 | Supported for seed-0 compatibility qualification |
+| AP-local RL改善frozen D-GNN或C-GNN | Contradicted by the tested 5-seed formal matrix |
 
-## 8. Stage 5B pre-execution record
+## 8. Stage 5B Gate 5.5 evidence與RL handoff
 
 2026-08-28在任何Stage 5B implementation/training前，scope凍結為：
 
@@ -134,31 +134,40 @@ H3+priority是moving 2×2 cells中的最高mean-rate組合，但priority使H3的
 3. Primary是$\pi_D+$D-GNN；$\pi_C+$C-GNN是upper reference；$\pi_{\mathrm{RZF}}+$RZF是control；
 4. Frozen GNN不fine-tune；RZF-trained policy換接GNN只算transfer diagnostic。
 
-目前Stage 5 stored-CSI GNN adapter、C/D B2/B8 baselines、AP-local actor/critic/trainer與learned artifacts皆不存在。`stage5b_eligible=true`只表示Stage 5A gate通過，不表示Stage 5B完成。
+Gate 5.5於2026-08-29完成straight 0/30/80 km/h formal GPU qualification。三個settings與aggregate completion皆為complete；constraints、Stage 5A byte-identical inputs、stored/true CSI visibility與dynamic-mask/power checks全數通過，C/D `H3+B8`對Stage 3 full-current reference的最大絕對誤差為0。Remote artifacts同步後68個檔案逐檔SHA-256一致，79,640,800 bytes已封存於本機。
+
+Matching no-RL `H3+priority@B2`最小evidence：30 km/h C/D sum rate為26.5149/25.8099，對各自B8 retention為99.876%/99.927%；80 km/h為25.8617/24.9061，retention為96.767%/97.076%。這些是compatibility與information-loss描述，不是C/D比較或method superiority。
+
+Gate 5.6–5.7的三條deterministic smoke、seed-0 pilots、matching/crossed evaluation與5-seed formal matrix均完成；finite、reload、locality、no-leakage、top-2/B2、mask/power與protocol gates全數通過。
+
+但learned performance失敗：5 seeds × 3 speeds × 3 matching beamformers共45個paired comparisons沒有正delta。九個formal cells的mean sum-rate delta約落在RZF −12.812至−11.471、D-GNN −11.412至−10.630、C-GNN −11.797至−11.317；各cell皆0/5 positive seeds，雙尾exact sign $p=0.0625$。三actor raw scores雖不同，top-2/B2 projected controls仍出現plateau且switching偏高。因此結論是「RL pipeline qualification成功，但本次最小RL方法不勝matching `H3+priority@B2` baseline」，不再宣稱或追索RL improvement。
 
 ## 9. Statistical與reproducibility boundary
 
-- Stage 1B/1C有5個effective seeds；Stage 2–5A仍主要是單一environment seed與單一AP layout的development evidence。
-- Stage 3–5的多cell observations沒有formal multiplicity-controlled inference；不報significance、equivalence或winner claim。
+- Stage 1B/1C與Stage 5B有5個effective seeds；Stage 2–5A仍主要是單一environment seed與單一AP layout的development evidence。
+- Stage 5B formal方向在九個cells一致為負，但$n=5$且未作跨cell multiplicity correction；$p=0.0625$只作descriptive evidence，不宣稱一般性劣勢。
 - Local/remote hash一致證明artifact transfer integrity，不等於independent replication。
 - Aggregate sum-rate不能下推每個UE/link；Stage 4/5的tail與starvation反例必須隨任何mean-rate結果一起報告。
 - Simulator內paired interventions可描述within-simulator effect，但不能外推實際feedback-bit overhead、其他topologies或真實網路效果。
 
-Formal evidence留到Stage 7：至少5個paired seeds，以seed或完整trajectory aggregate作統計單位，報paired effect、confidence interval、effect size與必要的multiplicity control。
+Stage 5B的5-seed formal evidence只適用於目前凍結的單一AP layout、simulator與protocol；不能外推其他actor/action family或真實網路。
 
 ## 10. Compact artifact index
 
 | Evidence | Location |
 |---|---|
-| Stage 1C source/checkpoint handoff | `code/stage1/`及remote `lab301-5090:~/ThomasLai/code/stage1/` |
-| Stage 2-BPP results | remote `lab301-5090:~/ThomasLai/code/stage2/` |
-| Stage 3 results，包括封存SAC artifacts | remote `lab301-5090:~/ThomasLai/code/stage3/` |
+| Stage 1C source/checkpoint handoff | `code/stage1/`及remote `lab301-5090-tailscale:~/ThomasLai/code/stage1/` |
+| Stage 2-BPP results | remote `lab301-5090-tailscale:~/ThomasLai/code/stage2/` |
+| Stage 3 results，包括封存SAC artifacts | remote `lab301-5090-tailscale:~/ThomasLai/code/stage3/` |
 | Stage 4 results | `code/stage4/results_stage4_seed0/`及remote `ws2:~/ThomasLai/code/stage4/` |
 | Stage 5A successful results | `code/stage5/results_stage5_seed0_boundary_rerun2/`、`code/stage5/results_stage5_seed0_rerun2/`、`code/stage5/run-exp-v5-rerun2.log` |
-| Stage 5A failed boundary attempts | remote `lab301-5090:~/ThomasLai/code/stage5/`；保留原fresh roots/logs |
+| Stage 5A failed boundary attempts | remote `lab301-5090-tailscale:~/ThomasLai/code/stage5/`；保留原fresh roots/logs |
+| Stage 5B Gate 5.5 formal evidence | `code/stage5/results_stage5b_gnn_gate_seed0/`及remote `lab301-5090-tailscale:~/ThomasLai/code/stage5/results_stage5b_gnn_gate_seed0/` |
+| Stage 5B smoke、pilot與seed-0 evaluation | `code/stage5/results_stage5b_rl_*seed0*/`及對應remote roots |
+| Stage 5B 5-seed formal evidence | remote `lab301-5090-tailscale:~/ThomasLai/code/stage5/results_stage5b_rl_formal/` |
 
 Artifact路徑是provenance locator，不表示所有remote內容已獨立重跑或本地鏡像完整。
 
 ## 11. 下一次更新條件
 
-下一次只在Stage 5B Gate 5.5有新evidence時更新：記錄frozen C/D GNN adapter hashes、B2/B8 compatibility、stored-CSI visibility、dynamic-mask/power checks與paired no-RL baselines。Gate 5.5通過前，不新增RL結果段落。
+Stage 5B以qualified pipeline／learned negative封存。下一次只在formal artifacts完成本機鏡像，或另行凍結新的method scope時更新；不因本次負結果事後更換seed、ceiling或action family。

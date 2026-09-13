@@ -5,9 +5,9 @@
 - Origin Skill: academic-research-suite / experiment-agent
 - Origin Mode: plan
 - Origin Date: 2026-08-26
-- Last Updated: 2026-08-28
-- Verification Status: ACTIVE（Stage 5A Gates 5.0–5.4已通過；Stage 5B frozen-GNN baseline與beamformer-matched RL尚未實作或執行）
-- Version Label: stage5_joint_decentralized_active_csi_plan_v5_compacted
+- Last Updated: 2026-08-29
+- Verification Status: ACTIVE（Stage 5A Gates 5.0–5.4與Gate 5.5已通過；最小matching RL core已實作並通過local mechanical tests；Gate 5.6 smoke/pilots尚未執行）
+- Version Label: stage5_joint_decentralized_active_csi_plan_v6_compacted
 - Parent Plan: `doc/decentralized_active_csi_experiment_plan.md`
 - Living Report: `doc/decentralized_active_csi_experiment_report.md`
 - Stage 3 Handoff: `doc/stage3_dynamic_association_experiment_plan.md`
@@ -24,7 +24,7 @@
 - 每個policy必須用matching beamformer reward訓練；RZF-trained policy換接GNN只算transfer diagnostic。
 - Frozen GNN不fine-tune；本方法不能稱為end-to-end jointly trained RL–GNN。
 
-Stage 5A joint evaluator與RZF modular controls已完成。下一個任務只做Stage 5B frozen-GNN baseline與AP-local learned integration。Stage 3 SAC與Stage 4 B1/B3/random sweep已封存，不再補seed或帶入formal matrix。
+Stage 5A joint evaluator與RZF modular controls已完成。Gate 5.5 formal GPU qualification已在straight 0/30/80 km/h通過：frozen C/D B2/B8、stored-CSI visibility、dynamic mask/power、Stage 5A byte-identical inputs與Stage 3 B8 reproduction均無違規。最小AP-local actor、central twin critic、replay與trainer已實作；下一個任務是依序執行三條deterministic smoke。Stage 3 SAC與Stage 4 B1/B3/random sweep已封存，不再補seed或帶入formal matrix。
 
 ## 2. Frozen handoff
 
@@ -56,7 +56,7 @@ Primary development只用30/80 km/h；0 km/h是stationary boundary。Hotspot、m
 | Frozen C/D GNN | Stage 3 `model_2.py`與dynamic-mask formatting；建立Stage 5 local adapter |
 | Existing RL mechanics | Stage 3 training code只參考replay/checkpoint/finite patterns |
 
-Stage 1–4 source不得runtime import；Stage 5使用stage-local copies與source snapshot。Gate 5.5前只需既有`environment.py`、`association.py`、`feedback.py`、`controller.py`、`evaluate.py`、numerical utility、test與runner。Gate 5.5/5.6再最小新增frozen `model_2.py` adapter、AP-local actor/critic、trainer與runner；不建立shared framework或新增dependency。
+Stage 1–4 source不得runtime import；Stage 5使用stage-local copies與source snapshot。Gate 5.5使用byte-identical frozen `model_2.py`、既有`evaluate.py`內的最小adapter、`test_stage5.py`與`run_stage5b.sh`；Gate 5.6以`rl_core.py`、`train_rl.py`、`evaluate_rl.py`與`run_stage5c.sh`提供最小AP-local actor/critic、trainer與evidence runner，不建立shared framework或新增dependency。
 
 ## 4. Joint causal state
 
@@ -137,7 +137,7 @@ Stage 5A已通過Gates 5.0–5.4：provenance、joint-state tests、short smoke�
 | Centralized GNN | `fixed+RR@B2` | `H3+priority@B2` | `H3+B8` |
 | Decentralized GNN | `fixed+RR@B2` | `H3+priority@B2` | `H3+B8` |
 
-RZF cells已由Stage 5A提供；C/D GNN尚未執行。B8用於full-current compatibility與information loss，不是B2 method comparator。
+RZF cells由Stage 5A提供；C/D GNN已在Gate 5.5完成。30 km/h的C/D matching no-RL retention為99.876%/99.927%，80 km/h為96.767%/97.076%；B8仍只作full-current compatibility與information-loss anchor，不是B2 method comparator。
 
 ### 8.2 Matching RL paths
 
@@ -159,6 +159,8 @@ $$
 - B8 C/D在相同frames重現Stage 3 full-current dynamic-mask inference至predeclared tolerance。
 - C-GNN不讀hidden current CSI；D-GNN不超出AP-local visibility；perturbation與saved-input hashes通過。
 
+**Verdict：PASS（2026-08-29）。** 三個speed settings與aggregate completion皆為complete；所有constraints與Stage 5A input checks通過，C/D B8對Stage 3 reproduction的最大絕對誤差為0；remote/local 68個檔案SHA-256逐檔一致。
+
 ### Gate 5.6 — Matching learned policies
 
 - Loss、Q、entropy、gradients、parameters、raw scores、projected actions與metrics finite。
@@ -176,11 +178,11 @@ $$
 
 ## 10. Execution order
 
-1. 建立Stage 5 local frozen-GNN adapter與source hashes。
-2. 加入stored-CSI/dynamic-mask/power/visibility unit tests。
-3. 跑2 trajectories × 100 frames CPU smoke，涵蓋至少一次association epoch。
-4. 完成C/D B8 reproduction及B2 no-RL baselines；Gate 5.5通過才啟動RL。
-5. 依完全相同protocol跑$\pi_{\mathrm{RZF}}$、$\pi_D$、$\pi_C$ smoke與seed-0 pilots。
+1. 建立Stage 5 local frozen-GNN adapter與source hashes。**已完成實作。**
+2. 加入stored-CSI/dynamic-mask/power/visibility unit tests。**已完成並通過。**
+3. 跑2 trajectories × 100 frames CPU smoke，涵蓋至少一次association epoch。**已完成並通過。**
+4. 完成C/D B8 reproduction及B2 no-RL baselines。**已完成；Gate 5.5 PASS。**
+5. 依完全相同protocol跑$\pi_{\mathrm{RZF}}$、$\pi_D$、$\pi_C$ smoke與seed-0 pilots。**下一個執行步驟。**
 6. 對matching pairs與C/D crossed paths作paired evaluation，完成Gate 5.6–5.7。
 
 基礎validation：
