@@ -300,7 +300,61 @@ $$\text{rate}(W_{\text{GNN}}, \theta_{\text{greedy}}) \;\le\; \max_{\theta} \tex
 | 分散式系統實際上可勝過集中式 | **Not supported** — 貪婪相位需全域真實 CSI，此為 headroom 陳述而非可部署結論 |
 | 翻轉的成因已釐清 | Not established — 推測與 GNN beamformer 對其自身低品質相位的共適應有關，未驗證 |
 
-## 10. Overhead 分析（解析式）
+## 10. 連續相位聯合可達參考點
+
+### 10.1 方法
+
+§8 的貪婪搜尋對聯合最佳做了三重限制：座標式局部最佳、限定 2-bit 網格、$W$ 凍結。`code/stage0/continuous_ceiling.py` 移除後兩項，直接以 Adam 對真實 sum rate 做上升：
+
+- $\theta = e^{j\phi}$ 參數化，單位模由建構保證，不需流形機制；
+- $W$ 沿用 `node_update` 相同的 mask-then-normalize 規則，故可行集與 GNN 完全相同；
+- 三種模式：`phase_only`（$W$ 凍結於 GNN）、`joint`（$\theta, W$ 皆自由，由 GNN 解出發）、`joint_rand`（同前但由隨機出發，取 3 次重啟最佳）。
+
+此設計與文獻 [3]–[8] 的 WMMSE／manifold 交替優化屬同一類模型式參考，但約束處理更易驗證。可行性在每次優化後檢查：
+
+| 檢查 | phase_only | joint | joint_rand |
+|---|---:|---:|---:|
+| 功率超出預算 | 0.0 | $-1.5\times10^{-8}$ | $-5.3\times10^{-5}$ |
+| 單位模誤差 | $6.0\times10^{-8}$ | $6.0\times10^{-8}$ | $6.0\times10^{-8}$ |
+| 遮蔽欄位的 beamformer | 0.0 | 0.0 | 0.0 |
+
+### 10.2 可達階梯（$M=2$、$P_{\max}=15$ dBm、320 samples／40 batches）
+
+| 方案 | sum rate | cSE | 佔 `joint_rand` 比例 |
+|---|---:|---:|---:|
+| GNN + 2-bit 量化（論文 "D"） | 6.8240 | 0.263 | 23.1% |
+| GNN 連續相位（論文 "C"） | 7.4538 | 0.289 | **25.2%** |
+| 貪婪 2-bit（$W$ 凍結，§8） | 14.0031 | 0.394 | 47.4% |
+| 連續相位解量化為 2-bit（$W$ 凍結） | 13.8294 | 0.369 | 46.8% |
+| 連續相位（$W$ 凍結） | 16.2049 | 0.512 | 54.9% |
+| 聯合解量化為 2-bit | 24.9408 | 0.601 | 84.4% |
+| 聯合（由 GNN 解出發） | 26.3268 | 0.851 | 89.1% |
+| **聯合（由隨機出發，3 次重啟）** | **29.5361** | 0.852 | 100% |
+
+| 配對比較 | 平均差 | cSE | $t$ | batch 勝率 |
+|---|---:|---:|---:|---:|
+| 連續相位 − GNN | +8.7511 | 0.325 | 26.9 | 100% |
+| 聯合 − GNN | +18.8730 | 0.647 | 29.2 | 100% |
+| 聯合 − 連續相位 | +10.1219 | 0.474 | 21.3 | 100% |
+| **聯合（隨機起點） − 聯合（GNN 起點）** | **+3.2093** | 0.213 | 15.1 | 100% |
+| 聯合量化 − GNN 量化 | +15.4697 | 0.435 | 35.6 | 100% |
+
+三項結論：
+
+1. **論文的主要數字只達到可達水準的約四分之一**（25.2%）。§8 的「GNN 僅達貪婪搜尋的 46–58%」低估了差距，因為貪婪搜尋本身也只有 2-bit 可達值的 56%。
+2. **由 GNN 解出發的聯合優化，結果比由隨機出發更差**（26.33 vs 29.54，$t=15.1$，100% 勝率）。GNN 的解不只次佳，還位於一個比隨機起點更差的盆地。
+3. 連續最佳解直接捨入為 2-bit 得 13.83，略**低於**直接在離散空間搜尋的貪婪 14.00，再次顯示事後量化不如量化感知優化，惟幅度僅 0.17。
+
+### 10.3 Claim boundary
+
+| Claim | Verdict |
+|---|---|
+| 優化過程始終在問題 (8) 的可行集內 | Supported（見 10.1 檢查表） |
+| 29.54 為聯合最佳的上界 | **Contradicted** — 非凸問題的局部最佳，仍是**下界** |
+| 此參考點為可部署方案 | **Contradicted** — 逐實例優化，需全域真實 CSI 與 2000 次梯度步 |
+| GNN 與參考點的差距全部源於架構能力不足 | Not established — 訓練預算的貢獻待 §12 缺口 3 的長訓練實驗釐清 |
+
+## 11. Overhead 分析（解析式）
 
 ### 10.1 Table II 的計量不一致
 
@@ -330,7 +384,7 @@ $$\text{rate}(W_{\text{GNN}}, \theta_{\text{greedy}}) \;\le\; \max_{\theta} \tex
 
 > 更正紀錄：本報告 v1 曾依 Table II 字面值宣稱「分散式總訊令量約為集中式的 7 倍」。該結論建立在低估的集中式欄位上，已由本節取代。
 
-## 11. 方向判斷
+## 12. 方向判斷
 
 依實測 headroom 排序：
 
@@ -352,7 +406,7 @@ $$\text{rate}(W_{\text{GNN}}, \theta_{\text{greedy}}) \;\le\; \max_{\theta} \tex
 3. GNN 相位品質不佳的成因分離：訓練未收斂（已有證據）／架構表達力不足／實作瑕疵（masked max、未使用的 `edge_update`、no-op pruning）三者尚未區分。
 4. MRT／RZF 搭配優化或隨機 RIS 的古典參考點（`code/stage1/`、`code/stage5/` 已有可移植的實作）。
 
-## 12. Reproducibility 與環境
+## 13. Reproducibility 與環境
 
 - 環境：`torch 2.11.0+cu128`，NVIDIA GeForce RTX 5060 Laptop GPU；conda env `decentralized-inference`。
 - stage0 原始碼 commit：`b712cb1`（2026-08-20）。
@@ -372,7 +426,7 @@ SHA-256：
 | `ablation_local_csi.py` | `c630e1e788f810f10b306734d5a70ef3c5a8ac6c45a522c84e4b071e187b7908` |
 | 重跑 final eval | `4e6294fedb729b97457b1a248fc32c412fec3a1287e60fdbe3098a5486182ebb` |
 
-## 13. Artifact Index
+## 14. Artifact Index
 
 | Evidence | Location |
 |---|---|
@@ -387,6 +441,6 @@ SHA-256：
 
 `paired_sum_rates.npz` 內含每個 sample 的配對 sum rate，可直接重算本報告的所有統計量。
 
-## 14. 下一次更新條件
+## 15. 下一次更新條件
 
 本報告在下列任一情況下更新：加入 continuous-phase near-optimal ceiling（WMMSE／manifold）；stage0 baseline 改以 $n \ge 6$ 獨立 seed 重新量測；或凍結新的 method scope 時。不因單次負結果事後更換 seed、ceiling 或操作點。
