@@ -35,7 +35,7 @@ def collect(root):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--root", default="results_discrete_cd")
+    p.add_argument("--root", default="../../artifacts/decentralized_ris/discrete_cd")
     p.add_argument("--out", default=None)
     args = p.parse_args()
 

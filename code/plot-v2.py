@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
+"""Plot a parameter sweep directly from JSON result summaries."""
+
 import argparse
+import json
 import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
 from matplotlib.ticker import AutoMinorLocator
 
 
@@ -14,47 +15,92 @@ STYLES = {
     "decentralized_gnn": ("Decentralized GNN", "tab:blue", "-", "s"),
     "centralized": ("Centralized", "tab:red", "-", "o"),
     "centralized_discrete": ("Centralized (2-bit)", "tab:red", "--", "o"),
+    "centralized_random_phase": (
+        "Centralized (random phase)", "tab:red", ":", "o"
+    ),
     "centralized_random_phase_discrete": (
-        "Centralized (random 2-bit)", "tab:red", ":", "o"
+        "Centralized (random 2-bit)", "tab:red", "-.", "o"
     ),
     "decentralized": ("Decentralized", "tab:blue", "-", "s"),
     "decentralized_discrete": ("Decentralized (2-bit)", "tab:blue", "--", "s"),
+    "decentralized_random_phase": (
+        "Decentralized (random phase)", "tab:blue", ":", "s"
+    ),
     "decentralized_random_phase_discrete": (
-        "Decentralized (random 2-bit)", "tab:blue", ":", "s"
+        "Decentralized (random 2-bit)", "tab:blue", "-.", "s"
     ),
 }
 
 
-def load_stage1_results(results_root):
+def _new_run(summary_path):
+    with summary_path.open(encoding="utf-8") as handle:
+        summary = json.load(handle)
+    metrics = summary.get("final_eval")
+    if not metrics:
+        return None
+    return summary["config"], metrics
+
+
+def _scaling_run(summary_path):
     pattern = re.compile(r"([A-Za-z]+)([-+]?\d*\.?\d+)")
-    experiments = []
-    for summary_path in sorted(Path(results_root).glob("*/final_summary.npy")):
-        variables = dict(pattern.findall(summary_path.parent.name))
-        summary = np.load(summary_path, allow_pickle=True).item()
-        experiments.append((variables, summary))
+    with summary_path.open(encoding="utf-8") as handle:
+        summary = json.load(handle)
+    return dict(pattern.findall(summary_path.parent.name)), summary
 
+
+def _x_key(experiments, requested):
+    if requested:
+        if not all(requested in parameters for parameters, _ in experiments):
+            raise KeyError(f"x key {requested!r} is absent from at least one run")
+        return requested
+
+    shared = set(experiments[0][0])
+    for parameters, _ in experiments[1:]:
+        shared.intersection_update(parameters)
+    varying = []
+    for key in shared:
+        try:
+            values = {float(parameters[key]) for parameters, _ in experiments}
+        except (TypeError, ValueError):
+            continue
+        if len(values) > 1:
+            varying.append(key)
+    if len(varying) != 1:
+        raise ValueError(
+            f"expected one varying numeric parameter, found {varying}; pass --x-key"
+        )
+    return varying[0]
+
+
+def load_result_summaries(results_root, x_key=None):
+    root = Path(results_root)
+    summary_paths = sorted(root.glob("*/summary.json"))
+    loader = _new_run
+    if not summary_paths:
+        summary_paths = sorted(root.glob("*/final_summary.json"))
+        loader = _scaling_run
+
+    experiments = [loaded for path in summary_paths if (loaded := loader(path))]
     if not experiments:
-        raise FileNotFoundError(f"No final summaries found in {results_root}")
+        raise FileNotFoundError(f"no usable JSON summaries found in {results_root}")
 
-    varying_key = next(
-        key
-        for key in experiments[0][0]
-        if len({float(variables[key]) for variables, _ in experiments}) > 1
-    )
-    data = {}
-    for variables, summary in experiments:
-        x = float(variables[varying_key])
-        for method in ("centralized_gnn", "decentralized_gnn"):
-            data.setdefault(method, {})[x] = summary[method]["mean"]
-    return pd.DataFrame.from_dict(data, orient="index").sort_index(axis=1)
+    key = _x_key(experiments, x_key)
+    series = {}
+    for parameters, metrics in experiments:
+        x = float(parameters[key])
+        for method in STYLES:
+            value = metrics.get(method)
+            if isinstance(value, dict):
+                value = value.get("mean")
+            if value is not None:
+                series.setdefault(method, {})[x] = float(value)
+    if not series:
+        raise ValueError("the summaries contain no plottable metrics")
+    return key, series
 
 
-def plot(excel_file, x_label, output_base, results_root=None):
-    if results_root:
-        df = load_stage1_results(results_root)
-    else:
-        df = pd.read_excel(excel_file, index_col=0)
-    x = df.columns.astype(float)
+def plot(results_root, x_label, output_base, x_key=None):
+    _, series = load_result_summaries(results_root, x_key)
 
     plt.rcParams.update(
         {
@@ -71,12 +117,16 @@ def plot(excel_file, x_label, output_base, results_root=None):
     )
 
     fig, ax = plt.subplots(figsize=(7.2, 5.4))
+    all_x = set()
     for key, (label, color, linestyle, marker) in STYLES.items():
-        if key not in df.index:
+        points = series.get(key)
+        if not points:
             continue
+        x = sorted(points)
+        all_x.update(x)
         ax.plot(
             x,
-            df.loc[key].values,
+            [points[value] for value in x],
             color=color,
             linestyle=linestyle,
             marker=marker,
@@ -89,7 +139,7 @@ def plot(excel_file, x_label, output_base, results_root=None):
 
     ax.set_xlabel(x_label)
     ax.set_ylabel("Sum Rate (bps/Hz)")
-    ax.set_xticks(x)
+    ax.set_xticks(sorted(all_x))
     ax.xaxis.set_minor_locator(AutoMinorLocator(2))
     ax.yaxis.set_minor_locator(AutoMinorLocator(2))
     ax.grid(True, which="major", linestyle=":", linewidth=0.9)
@@ -113,13 +163,14 @@ def plot(excel_file, x_label, output_base, results_root=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Plot a Stage 0 or Stage 1 sweep.")
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--excel", help="Input Stage 0 summary workbook")
-    source.add_argument(
-        "--results-root", help="Stage 1 sweep directory containing final summaries"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--results-root", required=True, help="Sweep directory containing run summaries"
+    )
+    parser.add_argument(
+        "--x-key", help="Config key on the x axis; inferred for a one-variable sweep"
     )
     parser.add_argument("--x-label", required=True, help="X-axis label")
     parser.add_argument("--output-base", required=True, help="Output path without suffix")
     args = parser.parse_args()
-    plot(args.excel, args.x_label, args.output_base, args.results_root)
+    plot(args.results_root, args.x_label, args.output_base, args.x_key)

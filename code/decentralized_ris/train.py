@@ -46,7 +46,7 @@ def parse_args():
     parser.add_argument("--val_seed", type=int, default=20260913)
     parser.add_argument("--eval_seed", type=int, default=20260914)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--out_dir", default="results_ris_action")
+    parser.add_argument("--out_dir", default="../../artifacts/decentralized_ris/runs")
     parser.add_argument("--save_every", type=int, default=2000)
     parser.add_argument("--resume")
     parser.add_argument("--tensorboard", action="store_true")

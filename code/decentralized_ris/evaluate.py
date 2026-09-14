@@ -167,7 +167,10 @@ def main():
     parser.add_argument("--samples", type=int, default=3200)
     parser.add_argument("--eval_seed", type=int, default=20260914)
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--out", default="results_ris_action/final_screening.json")
+    parser.add_argument(
+        "--out",
+        default="../../artifacts/decentralized_ris/evaluation/final_screening.json",
+    )
     args = parser.parse_args()
 
     run_dirs = sorted(

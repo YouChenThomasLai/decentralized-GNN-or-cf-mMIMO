@@ -206,7 +206,7 @@ def main():
     p.add_argument("--rounds", type=int, default=4)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda:0")
-    p.add_argument("--out_dir", default="results_discrete_cd")
+    p.add_argument("--out_dir", default="../../artifacts/decentralized_ris/discrete_cd")
     args = p.parse_args()
 
     stacked, cd_history, verify_err, verified_cd = evaluate(args)

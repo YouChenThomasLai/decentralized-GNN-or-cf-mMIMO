@@ -73,7 +73,9 @@ def main():
     p.add_argument("--greedy", action="store_true", help="also run the greedy phase search")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda:0")
-    p.add_argument("--out_dir", default="results_local_csi_ablation")
+    p.add_argument(
+        "--out_dir", default="../../artifacts/decentralized_ris/local_csi_ablation"
+    )
     args = p.parse_args()
 
     device = resolve_device(args.device)

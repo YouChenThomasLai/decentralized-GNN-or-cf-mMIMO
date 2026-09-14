@@ -127,7 +127,9 @@ def main():
     p.add_argument("--restarts", type=int, default=3)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda:0")
-    p.add_argument("--out_dir", default="results_continuous_ceiling")
+    p.add_argument(
+        "--out_dir", default="../../artifacts/decentralized_ris/continuous_ceiling"
+    )
     args = p.parse_args()
 
     device = resolve_device(args.device)
