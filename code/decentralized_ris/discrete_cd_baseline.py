@@ -1,4 +1,4 @@
-"""Discrete RIS phase baseline for a trained Stage 0 checkpoint.
+"""Discrete RIS phase baseline for a trained decentralized RIS checkpoint.
 
 The paper obtains its discrete ("D") curves by rounding the continuous GNN phase
 output to the nearest point of the Q-bit grid. This script keeps the beamformer

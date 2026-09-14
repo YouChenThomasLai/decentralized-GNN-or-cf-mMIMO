@@ -6,7 +6,7 @@
 # six-seed attempt held two GPUs and was killed once that penalty exhausted the
 # quota, so this run pins exactly one device.
 set -u
-cd /tmp2/b12902052/ThomasLai/code/stage0
+cd /tmp2/b12902052/ThomasLai/code/decentralized_ris
 PY=/tmp2/b12902052/miniforge3/envs/decentralized-inference/bin/python
 
 # The quota resets at 00:00 UTC+8; wait past it before touching a GPU.

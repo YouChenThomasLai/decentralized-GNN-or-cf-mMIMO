@@ -1,5 +1,5 @@
 #!/bin/bash
-# Discrete RIS coordinate-descent baseline over the Stage 0 checkpoints.
+# Discrete RIS coordinate-descent baseline over the decentralized RIS checkpoints.
 # Headline cell is M=2, Pmax=15 dBm; the sweeps use fewer samples per point.
 set -u
 

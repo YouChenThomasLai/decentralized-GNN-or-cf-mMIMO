@@ -5,14 +5,14 @@
 #
 # The evaluation runs first and deliberately reuses the reference settings and
 # sample counts already applied to the 2k and 40k checkpoints in
-# doc/stage0_training_budget_report.md, so the three points stay comparable.
+# doc/decentralized_ris_evidence.md, so the three points stay comparable.
 #
 # meow2 enforces a 24 GPU-hour daily quota that resets at 00:00 UTC+8 and
 # multiplies the deduction rate by (N+0.2)*N when a user holds N GPUs while
 # fewer than N sit idle. Every stage below therefore pins exactly one device;
 # the six-seed sweep that held two was killed by that penalty.
 set -u
-cd /tmp2/b12902052/ThomasLai/code/stage0
+cd /tmp2/b12902052/ThomasLai/code/decentralized_ris
 PY=/tmp2/b12902052/miniforge3/envs/decentralized-inference/bin/python
 
 RUN=results_extend_100k/M2_N30_L4_K8_P15.0_iter60000_seed0/run0

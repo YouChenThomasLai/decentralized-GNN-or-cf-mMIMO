@@ -1,4 +1,4 @@
-"""Train stage 0 for an arbitrary budget using the vectorized forward pass.
+"""Train the decentralized RIS model using the vectorized forward pass.
 
 `trainer_2.Trainer` hard-codes `n_iter = 2000`, and its 2000-iteration training
 curve is still rising, so the GNN's shortfall against the phase-search reference

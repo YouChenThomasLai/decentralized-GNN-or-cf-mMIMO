@@ -1,4 +1,4 @@
-"""Continuous-phase achievable reference for a trained Stage 0 checkpoint.
+"""Continuous-phase achievable reference for a trained decentralized RIS checkpoint.
 
 The greedy 2-bit search in `discrete_cd_baseline.py` lower-bounds the joint
 optimum three times over: it is a coordinate-wise local optimum, it is confined
@@ -11,7 +11,7 @@ last two restrictions by optimizing the true sum rate directly with Adam:
 
 Unit modulus is exact by construction (theta = e^{j phi}), and the per-AP power
 constraint reuses the same mask-then-normalize rule as `node_update`, so every
-iterate stays inside the feasible set of Problem (8). Nothing in stage 0 is
+iterate stays inside the feasible set of Problem (8). Nothing in the baseline is
 modified; the checkpoint is read only.
 """
 

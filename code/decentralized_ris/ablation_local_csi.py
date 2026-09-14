@@ -6,7 +6,7 @@ that second feedback set removed, so each AP sees only the CSI of its own
 served links, and measures what the centralized-vs-decentralized gap becomes.
 
 The decentralized forward pass is reproduced here rather than edited in
-`model_2.py`, so stage 0 stays byte-identical. `--verify` checks that the
+`model_2.py`, so the baseline stays byte-identical. `--verify` checks that the
 reproduction matches `node_update.forward(training=False)` exactly when the
 extra feedback is enabled.
 """

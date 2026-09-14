@@ -1,6 +1,6 @@
 """Vectorized replacement for `node_update.forward(training=True)`.
 
-The stage 0 forward pass loops over samples, and inside every message-passing
+The baseline forward pass loops over samples, and inside every message-passing
 layer it loops over AP-UE nodes, so one training iteration builds an autograd
 graph out of thousands of tiny ops. Profiling a batch-8 iteration gives 4.7% in
 data generation and 95% in forward/backward, which caps the usable training
