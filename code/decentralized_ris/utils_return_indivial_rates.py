@@ -24,32 +24,6 @@ def gen_fixed_location(K,l):
        locations[k,:] = center + np.array([x,y])
    return locations
 
-def gen_BS_location(K,l):
-    center = np.array([0,0]) 
-    locations = np.zeros((K,2))
-    for k in range(K):
-        theta = np.random.uniform(0,2*np.pi)
-        x = l*np.cos(theta)
-        y = l*np.sin(theta)
-        locations[k,:] = center + np.array([x,y])
-    return locations
-
-
-def element_wise_mean(x):
-    batch = x.shape[0]
-    return torch.mean(x,dim=1)
-
-def element_wise_max(x):
-    return torch.amax(x,dim=1)
-
-def im2re(M):
-    M1 = np.concatenate((M.real,-M.imag),axis=2)
-    M2 = np.concatenate((M.imag,M.real),axis=2)
-    M_mat = np.concatenate((M1,M2),axis=1)
-    M_mat = torch.Tensor(M_mat)
-
-    return M_mat
-
 def gen_LOS(num_rev,num_trans,Rician_factor,L):
     LOS_array = []
     for l in range(L):

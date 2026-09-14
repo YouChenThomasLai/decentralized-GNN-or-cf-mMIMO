@@ -117,7 +117,7 @@ def main():
     os.makedirs(os.path.join(base, "models"), exist_ok=True)
     os.makedirs(os.path.join(base, "arrays"), exist_ok=True)
 
-    trainer = Trainer(args.M, args.N, args.L, args.K, args.batch_size, 1,
+    trainer = Trainer(args.M, args.N, args.L, args.K, args.batch_size,
                       args.pmax_dbm, device=args.device)
     device = trainer.device
     args.pmax_w = trainer.pmax_w

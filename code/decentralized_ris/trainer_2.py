@@ -32,17 +32,7 @@ os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
 print(f"[INFO] All random seeds fixed to {SEED} for full determinism.")
 
-# Debugging helpers
-torch.autograd.set_detect_anomaly(False)   # shows backward-pass NaN source
-
-def _assert_finite(where, *tensors):  #actually not called
-    for t in tensors:
-        if torch.is_tensor(t) and not torch.isfinite(t).all():
-            t_ = torch.nan_to_num(t)
-            print(f"[Non-finite @ {where}] "
-                  f"min={t_.min().item():.3e}, max={t_.max().item():.3e}, "
-                  f"norm={t_.norm().item():.3e}, shape={tuple(t.shape)}")
-            raise RuntimeError(f"Non-finite detected in {where}")
+torch.autograd.set_detect_anomaly(False)
 
 
 def _random_phase_like(theta, num_bits=None):
@@ -55,7 +45,7 @@ def _random_phase_like(theta, num_bits=None):
     return torch.stack((phase.cos(), phase.sin()), dim=-1)
 
 class Trainer():
-    def __init__(self,M,N,L,K,batch_size,at,pmax_dbm=10.0, device="cuda:0"):
+    def __init__(self,M,N,L,K,batch_size,pmax_dbm=10.0, device="cuda:0"):
         self.M = M                            # num of antennas per AP
         self.N = N                            # num of elements per RIS
         self.K = K                            # num of users
@@ -124,17 +114,8 @@ class Trainer():
         val_sum_rate_decentralized_discrete = []
         val_sum_rate_decentralized_random_phase = []
         val_sum_rate_decentralized_random_phase_discrete = []
-        val_EE  = [1]
-        val_sigma1 = []
-        val_sigma2 = []
-
         train_losses = []
         sum_rates = []
-
-        best_loss = float("inf")
-        best_sum_rate = -float("inf")
-        best_loss_model_path = None
-        best_sumrate_model_path = None
 
         for i in range(self.n_iter):
             loss, sum_rate, rate = self.train_batch()
@@ -246,17 +227,12 @@ class Trainer():
         np.save(os.path.join(array_dir, f"val_sum_rate_decentralized_random_phase_run{run_id}.npy"), np.array(val_sum_rate_decentralized_random_phase))
         np.save(os.path.join(array_dir, f"val_sum_rate_decentralized_random_phase_discrete_run{run_id}.npy"), np.array(val_sum_rate_decentralized_random_phase_discrete))
 
-        train_total = np.array(train_total)
-        val_EE = np.array(val_EE)
-
     def eval(self,test_sample,sigma,itera):
         
         self.model.eval()
         with torch.no_grad():                                      #! my addition
             iteration = int(test_sample/self.batch_size)
             num_bits = 2
-            EE = []
-
             sum_rate_array_centralized = []
             sum_rate_array_centralized_discrete = []
             sum_rate_array_centralized_random_phase = []
@@ -266,8 +242,6 @@ class Trainer():
             sum_rate_array_decentralized_discrete = []
             sum_rate_array_decentralized_random_phase = []
             sum_rate_array_decentralized_random_phase_discrete = []
-
-            over_array = []
 
             for i in range(iteration):
 
@@ -304,14 +278,11 @@ class Trainer():
                     duplicate=False,
                     regenerate_channels=False,
                 )
-                mean_ue = torch.Tensor(self.sum_UE/((itera+1)*self.batch_size))
-                mean_ue = mean_ue.to(self.device)
-
                 for num_BS in range(len(user_feature)):
                     user_feature[num_BS] = user_feature[num_BS].to(self.device)
                     e[num_BS] = e[num_BS].to(self.device)
                     e_dir[num_BS] = e_dir[num_BS].to(self.device)
-                W, theta = self.model(user_feature,e,user_index,e_dir,training=False,mean_ue=mean_ue)
+                W, theta = self.model(user_feature,e,user_index,e_dir,training=False)
                 loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.pmax_w, self.device)
                 sum_rate_array_decentralized.append(sum_rate.item())
 
@@ -379,7 +350,6 @@ if __name__ == '__main__':
                           args.L,
                           args.K,
                           args.batch_size,
-                          i+1, 
                           args.pmax_dbm,
                           device=args.device)       
         BS.append(trainer.dataloader.BS_Loc_array)

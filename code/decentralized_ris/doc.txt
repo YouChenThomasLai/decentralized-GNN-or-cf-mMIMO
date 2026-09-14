@@ -1,3 +1,0 @@
-This cleanup version yields the exact same result as in the first paper submission.
-
-The main cleanup is removing messy comments, and a general tidying up code.

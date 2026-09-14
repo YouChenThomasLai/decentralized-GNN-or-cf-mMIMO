@@ -355,7 +355,7 @@ class VariantNet(nn.Module):
 
     # --------------------------------------------------------------- forwards
     def forward(self, user_feature, e, user_index, e_dir,
-                training=True, duplicate=False, mean_ue=[]):
+                training=True, duplicate=False):
         if duplicate:
             raise NotImplementedError("the variant nets do not implement the duplicate pruning path")
         if training:

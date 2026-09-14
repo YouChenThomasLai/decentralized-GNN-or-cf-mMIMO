@@ -4,13 +4,6 @@ import torch.nn.functional as F
 from data import *
 from utils_return_indivial_rates import *
 
-
-def quick_stats(x, name):
-    x = x.detach()
-    print(f"{name}: shape={tuple(x.shape)}  "
-          f"min={x.min().item():.3e}  max={x.max().item():.3e}  "
-          f"mean={x.mean().item():.3e}  std={x.std().item():.3e}")
-
 class initial_layer(nn.Module):
     def __init__(self,M,N,L,ch, device):
         super(initial_layer,self).__init__()
@@ -250,7 +243,7 @@ class node_update(nn.Module):
 
         self.BS_readout = BS_readout(M,N,L,Pmax,ch*(D+1))
     
-    def forward(self,user_feature,e,user_index,e_dir,training=True,duplicate=False,mean_ue=[]):
+    def forward(self,user_feature,e,user_index,e_dir,training=True,duplicate=False):
         if training:
             #! user_feature.shape = torch.Size([32, 4, 40, 248])
             #! e.shape = torch.Size([32, 4, 40])

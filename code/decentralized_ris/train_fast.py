@@ -23,7 +23,7 @@ _original_forward = model_2.node_update.forward
 
 
 def _dispatch(self, user_feature, e, user_index, e_dir,
-              training=True, duplicate=False, mean_ue=[]):
+              training=True, duplicate=False):
     if duplicate:
         raise NotImplementedError("fast_forward does not implement the duplicate=True pruning path")
     if training:
@@ -74,7 +74,7 @@ def main():
     base = os.path.join(args.out_dir, exp, "run0")
     os.makedirs(os.path.join(base, "arrays"), exist_ok=True)
 
-    trainer = Trainer(args.M, args.N, args.L, args.K, args.batch_size, 1,
+    trainer = Trainer(args.M, args.N, args.L, args.K, args.batch_size,
                       args.pmax_dbm, device=args.device)
 
     if not args.skip_check:
