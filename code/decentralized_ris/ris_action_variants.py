@@ -1,6 +1,6 @@
 """Per-RIS action representation variants for the decentralized RIS GNN.
 
-`model_2.node_update` makes every AP emit a 4N latent phase feature and lets a
+The baseline model makes every AP emit a 4N latent phase feature and lets a
 CPU-side trainable `RIS_merge.f_merge` decode the summed features into a phase.
 This module keeps the paper's centralized-training / decentralized-inference
 protocol and its eq. (10) local-CSI visibility, and replaces only the RIS
@@ -14,11 +14,10 @@ representation, the AP output interface and the aggregation:
     r3b       r3a + parameter-free per-RIS   2N proposal      parameter-free
               context in the AP-UE update
 
-`r0` reuses `model_2`'s submodules under their original names, so an existing
-`node_update` checkpoint loads into `VariantNet(arch="r0")` and reproduces
-`fast_forward` bit-for-bit; `verify_r0_equivalence` checks that.
+`r0` reuses `model`'s submodules under their original attribute names, so an
+existing checkpoint remains compatible and `verify_r0_equivalence` checks it.
 
-Shapes follow `fast_forward`: B batch, R RIS, K total AP-UE nodes (= AP x users
+Shapes follow `model`: B batch, R RIS, K total AP-UE nodes (= AP x users
 per AP), A APs.
 """
 
@@ -27,8 +26,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import model_2
-from fast_forward import _initial_layer, _node_update_layer, _max_excluding_self
+import model
+from model import _initial_layer, _max_excluding_self, _node_update_layer
 
 ARCHS = ("r0", "r1", "r3a", "r3b")
 IDENTITIES = ("none", "scalar", "onehot", "learned", "physical")
@@ -155,7 +154,7 @@ class LinkEncoder(nn.Module):
 class ApNodeUpdateLayer(nn.Module):
     """AP-UE node update without an RIS message-passing node.
 
-    Mirrors `node_update_layer`'s AP-UE branch (self, element-wise max over the
+    Mirrors `NodeUpdateLayer`'s AP-UE branch (self, element-wise max over the
     other nodes) and optionally a parameter-free per-RIS context that reads the
     link-token bank instead of an RIS state.
     """
@@ -217,7 +216,7 @@ class ApConfidenceHead(nn.Module):
 
 
 class VariantNet(nn.Module):
-    """Drop-in replacement for `model_2.node_update` with a configurable RIS path."""
+    """GNN with a configurable RIS representation and action path."""
 
     def __init__(self, M, N, L, D, Pmax, ch, AP, device,
                  arch="r0", identity="none", consensus=None, tau=1.0, ris_loc=None):
@@ -244,9 +243,9 @@ class VariantNet(nn.Module):
 
         # --- AP-UE (beamforming) path, shared by every arch -------------------
         if self.ris_node:
-            self.init_user = model_2.initial_layer(M, N, L, ch, device)
+            self.init_user = model.InitialLayer(M, N, L, ch, device)
             self.update_list = nn.ModuleList(
-                [model_2.node_update_layer(ch * (d + 1), M, N, L, ch, device) for d in range(D)])
+                [model.NodeUpdateLayer(ch * (d + 1), M, N, L, ch, device) for d in range(D)])
         else:
             self.identity = RISIdentity(identity, L, ris_loc)
             self.link_encoder = LinkEncoder(self.in_dim, ch, self.identity.dim)
@@ -256,15 +255,15 @@ class VariantNet(nn.Module):
                 [ApNodeUpdateLayer(ch * (d + 1), ch, ctx_dim) for d in range(D)])
 
         self.AP_coeff_NN_list = nn.ModuleList(
-            [model_2.coeff_DNN2(M, N, L, Pmax, node_dim) for _ in range(AP)])
-        self.BS_readout = model_2.BS_readout(M, N, L, Pmax, node_dim)
+            [model.PowerControl(M, N, L, Pmax, node_dim) for _ in range(AP)])
+        self.BS_readout = model.BeamformerReadout(M, N, L, Pmax, node_dim)
 
         # --- RIS action path --------------------------------------------------
         if self.ris_node:
             self.RIS_readout_AP_list = nn.ModuleList(
-                [model_2.RIS_readout_AP(M, N, L, Pmax, node_dim, in_dim2=None) for _ in range(AP)])
+                [model.RisReadoutAp(M, N, L, Pmax, node_dim, in_dim2=None) for _ in range(AP)])
             if arch == "r0":
-                self.RIS_merge = model_2.RIS_merge(N)
+                self.RIS_merge = model.RisMerge(N)
             elif consensus == "confidence":
                 self.conf_head_list = nn.ModuleList([ApConfidenceHead(N) for _ in range(AP)])
         else:
@@ -282,8 +281,6 @@ class VariantNet(nn.Module):
         dead = []
         for name, module in self.named_modules():
             leaf = name.rsplit(".", 1)[-1]
-            if self.ris_node and leaf in ("fc", "edge_update"):
-                dead.append(name)                      # never called by node_update_layer.forward
             if self.arch == "r0" and leaf == "f_merge" and name.startswith("RIS_readout_AP_list"):
                 dead.append(name)                      # r0 decodes on the CPU instead
             if not self.ris_node and name == "phase_head.conf" and self.consensus != "confidence":
@@ -394,7 +391,7 @@ class VariantNet(nn.Module):
         blk = F.normalize(blk, dim=2, eps=1e-8) * torch.sqrt(self.Pmax * alpha).unsqueeze(2)
         W = blk.reshape(b, n_ap, two_m, k_user).permute(0, 2, 1, 3).reshape(b, two_m, k_tot)
 
-        # Every AP is present in the centralized view, matching `fast_forward`.
+        # Every AP is present in the centralized view, matching the baseline.
         active = torch.ones((b, n_ap), device=device, dtype=W.dtype)
         theta = self._merge(latents, proposals, confs, active)
         return W, theta
@@ -456,10 +453,8 @@ def build_model(args_like, device, ris_loc=None):
 
 
 def verify_r0_equivalence(dataloader, K, threshold, device, atol=0.0):
-    """`VariantNet(arch='r0')` must reproduce `fast_forward` on the same weights."""
-    from fast_forward import centralized_forward, decentralized_forward
-
-    ref = model_2.node_update(2, 30, 4, 6, torch.tensor(0.0316228), 2, 64, 5, device).to(device)
+    """`VariantNet(arch='r0')` must reproduce `BaselineNet`."""
+    ref = model.BaselineNet(2, 30, 4, 6, torch.tensor(0.0316228), 64, 5, device).to(device)
     var = VariantNet(2, 30, 4, 6, torch.tensor(0.0316228), 64, 5, device, arch="r0").to(device)
     missing, unexpected = var.load_state_dict(ref.state_dict(), strict=True), None
 
@@ -467,7 +462,7 @@ def verify_r0_equivalence(dataloader, K, threshold, device, atol=0.0):
     uf, e, ed = uf.to(device), e.to(device), ed.to(device)
     ui_a = np.array(ui, dtype=bool)
     with torch.no_grad():
-        W_ref, th_ref = centralized_forward(ref, uf.clone(), e.clone(), ui_a.copy(), ed.clone())
+        W_ref, th_ref = ref.centralized(uf.clone(), e.clone(), ui_a.copy(), ed.clone())
         W_var, th_var = var.centralized(uf.clone(), e.clone(), ui_a.copy(), ed.clone())
 
     ufd, ed_, uid, edd = dataloader.gen_testing_data(K, threshold, threshold,
@@ -476,7 +471,7 @@ def verify_r0_equivalence(dataloader, K, threshold, device, atol=0.0):
     ed_ = [t.to(device) for t in ed_]
     edd = [t.to(device) for t in edd]
     with torch.no_grad():
-        W_dref, th_dref = decentralized_forward(ref, ufd, ed_, uid, edd)
+        W_dref, th_dref = ref.decentralized(ufd, ed_, uid, edd)
         W_dvar, th_dvar = var.decentralized(ufd, ed_, uid, edd)
 
     return {

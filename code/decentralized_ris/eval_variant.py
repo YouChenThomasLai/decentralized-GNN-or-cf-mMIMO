@@ -94,6 +94,7 @@ def main():
 
     import trainer_2
     from data import MyDataLoader
+    from model import load_checkpoint
     from ris_action_variants import VariantNet
 
     results = {}
@@ -118,7 +119,7 @@ def main():
                            cfg["AP"], device, arch=cfg["arch"], identity=cfg["identity"],
                            consensus=consensus, tau=cfg["tau"],
                            ris_loc=dataloader.RIS_Loc_array).to(device)
-        model.load_state_dict(torch.load(ckpt, map_location=device))
+        load_checkpoint(model, ckpt, device)
 
         batches, um, per_user = evaluate(model, dataloader, cfg["K"], 0.1, pmax_w, device,
                                          args.samples, cfg["batch_size"], args.eval_seed)

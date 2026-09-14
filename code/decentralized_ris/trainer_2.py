@@ -7,7 +7,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from data import MyDataLoader
-from model_2 import node_update
+from model import BaselineNet
 from utils_return_indivial_rates import discrete_mapping
 
 # -------------------------------
@@ -58,7 +58,7 @@ class Trainer():
         self.dataloader.BS_RIS_association()
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")          
         self.num_of_AP = 5
-        self.model = node_update(M,N,L,6,self.pmax_w,2,64,self.num_of_AP, self.device).to(self.device)
+        self.model = BaselineNet(M, N, L, 6, self.pmax_w, 64, self.num_of_AP, self.device).to(self.device)
         print(f"[INFO] Per-AP Pmax = {self.pmax_dbm:g} dBm = {self.pmax_w:g} W.")
         self.min_rate = 1
         self.log_interval = 10

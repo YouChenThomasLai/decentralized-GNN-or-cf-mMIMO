@@ -21,6 +21,7 @@ import numpy as np
 import torch
 
 import ris_action_variants as rav
+from model import load_checkpoint
 from ris_action_variants import VariantNet, unit_modulus_error
 
 
@@ -143,13 +144,10 @@ def main():
 
     start_iter, opt_state = 0, None
     if args.resume:
-        bundle = torch.load(args.resume, map_location=device)
+        bundle = load_checkpoint(model, args.resume, device)
         if isinstance(bundle, dict) and "model" in bundle:
-            model.load_state_dict(bundle["model"])
             opt_state = bundle.get("optimizer")
             start_iter = int(bundle.get("iteration", 0))
-        else:
-            model.load_state_dict(bundle)
         print(f"[resume] {args.resume} at iteration {start_iter}")
 
     trainer.opt = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)

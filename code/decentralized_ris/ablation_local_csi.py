@@ -5,10 +5,8 @@ serving APs to each of them. This script re-runs decentralized inference with
 that second feedback set removed, so each AP sees only the CSI of its own
 served links, and measures what the centralized-vs-decentralized gap becomes.
 
-The decentralized forward pass is reproduced here rather than edited in
-`model_2.py`, so the baseline stays byte-identical. `--verify` checks that the
-reproduction matches `node_update.forward(training=False)` exactly when the
-extra feedback is enabled.
+The canonical model exposes the visibility switch directly. `--verify` checks
+that the paper setting matches the normal decentralized forward path.
 """
 
 import argparse
@@ -18,11 +16,10 @@ import random
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from data import MyDataLoader
-from model_2 import node_update
-from utils_return_indivial_rates import discrete_mapping, user_pruning
+from model import BaselineNet, load_checkpoint
+from utils_return_indivial_rates import discrete_mapping
 from discrete_cd_baseline import RatePrecompute, coordinate_descent, phase_levels
 
 
@@ -37,84 +34,19 @@ def set_seed(seed):
 
 
 def decentralized_forward(model, user_feature, e, user_index, e_dir, include_cross_ap_csi):
-    """Mirror of the `training=False` branch of `node_update.forward`.
-
-    `include_cross_ap_csi=True` reproduces the paper. Setting it to False drops
-    the second set of eq. (10): each AP then only sees links it serves itself.
-    Also returns, per AP, how many AP-UE nodes were visible.
-    """
-    device = model.device
-    n_ap = len(user_feature)
-    batch_size = user_feature[0].shape[0]
-
-    W = torch.zeros((batch_size, 2 * model.M, user_feature[0].shape[2] * n_ap)).to(device)
-    theta = torch.zeros((batch_size, user_feature[0].shape[1], model.N, 2)).to(device)
-    visible = np.zeros((batch_size, n_ap))
-
-    for sample in range(batch_size):
-        RIS_prior_merge = []
-        for num_BS in range(n_ap):
-            user_feature_cat = user_feature[0]
-            e_cat = e[0]
-            e_dir_cat = e_dir[0]
-            for i in range(n_ap - 1):
-                user_feature_cat = torch.cat((user_feature_cat, user_feature[i + 1]), dim=2)
-                e_cat = torch.cat((e_cat, e[i + 1]), dim=2)
-                e_dir_cat = torch.cat((e_dir_cat, e_dir[i + 1]), dim=2)
-
-            k = len(user_index[num_BS][sample])
-            new_user_index = np.array([False]).repeat(n_ap * k)
-            new_user_index[num_BS * k:(num_BS + 1) * k] = user_index[num_BS][sample]
-            actual_served_node = np.copy(new_user_index)
-
-            if include_cross_ap_csi:
-                served_user_id = np.where(user_index[num_BS][sample] == True)[0]
-                if len(served_user_id) != 0:
-                    for tmp_BS in range(n_ap):
-                        if tmp_BS == num_BS:
-                            continue
-                        for user_id in served_user_id:
-                            if user_index[tmp_BS][sample][user_id] == True:
-                                new_user_index[tmp_BS * k:(tmp_BS + 1) * k][user_id] = True
-
-            visible[sample, num_BS] = int(new_user_index.sum())
-
-            new_user_index = new_user_index == False
-            user_feature_cat[sample, :, new_user_index, :] = 0
-            e_cat[sample, :, new_user_index] = 0
-            e_dir_cat[sample, :, new_user_index] = 0
-            new_user_index[new_user_index == False] = True
-            user_feature_ext = user_feature_cat[sample, :, new_user_index, :].unsqueeze(0)
-
-            A = user_pruning(user_feature_ext.shape[2], 0, duplicate=False)
-            A = A == 1
-
-            e_ext = e_cat[sample, :, new_user_index].unsqueeze(0)
-            e_dir_ext = e_dir_cat[sample, :, new_user_index].unsqueeze(0)
-            if np.sum(user_index[num_BS][sample]) == 0:
-                continue
-
-            uk, rl = model.init_user(user_feature_ext, e_ext, e_dir_ext)
-            for i, _ in enumerate(model.update_list):
-                uk, rl = model.update_list[i](uk, rl, e_ext, A, e_dir_ext)
-                uk = uk.to(device)
-                rl = rl.to(device)
-
-            AP_coeff = model.AP_coeff_NN_list[num_BS](uk)
-            W_out = model.BS_readout(uk)
-
-            tmp_W = W_out[0, :, :]
-            W[sample, :, actual_served_node] = tmp_W[:, actual_served_node]
-
-            BS_W = W[sample, :, num_BS * k:(num_BS + 1) * k].reshape((1, -1))
-            BS_W = F.normalize(BS_W, dim=1, eps=1e-8) * torch.sqrt(model.Pmax * AP_coeff)
-            W[sample, :, num_BS * k:(num_BS + 1) * k] = BS_W.reshape((2 * model.M, -1))
-
-            e_AP = e[num_BS][sample, :, :].reshape(1, -1)
-            RIS_prior_merge.append(model.RIS_readout_AP_list[num_BS](rl, e_AP))
-
-        theta[sample] = model.RIS_merge(RIS_prior_merge).squeeze()
-
+    W, theta = model.decentralized(
+        user_feature, e, user_index, e_dir,
+        include_cross_ap_csi=include_cross_ap_csi,
+    )
+    masks = np.stack(user_index, axis=1).astype(bool)
+    if include_cross_ap_csi:
+        visible = np.stack(
+            [(masks[:, ap:ap + 1, :] & masks).sum(axis=(1, 2))
+             for ap in range(masks.shape[1])],
+            axis=1,
+        )
+    else:
+        visible = masks.sum(axis=2)
     return W, theta, visible
 
 
@@ -160,9 +92,9 @@ def main():
     dataloader = MyDataLoader(args.M, args.N, args.L, args.batch_size)
     dataloader.BS_RIS_association()
     pmax_w = 10 ** ((args.pmax_dbm - 30) / 10)
-    model = node_update(args.M, args.N, args.L, args.D, pmax_w, 2, args.ch,
+    model = BaselineNet(args.M, args.N, args.L, args.D, pmax_w, args.ch,
                         args.num_ap, device).to(device)
-    model.load_state_dict(torch.load(args.ckpt, map_location=device))
+    load_checkpoint(model, args.ckpt, device)
     model.eval()
 
     levels = phase_levels(args.num_bits, device)

@@ -1,34 +1,12 @@
-"""Train the decentralized RIS model using the vectorized forward pass.
-
-`trainer_2.Trainer` hard-codes `n_iter = 2000`, and its 2000-iteration training
-curve is still rising, so the GNN's shortfall against the phase-search reference
-may be a budget artifact rather than a capacity limit. This script redirects
-`node_update.forward` to `fast_forward` (verified equivalent, ~9x faster to train
-and ~200x faster to evaluate) and runs a longer budget. Only `n_iter` and the
-validation cadence differ from the paper's configuration; `model_2.py` and
-`trainer_2.py` are not modified on disk.
-"""
+"""Run a longer training budget with resumable checkpoints."""
 
 import argparse
-import json
 import os
 
 import numpy as np
 import torch
 
-import model_2
-from fast_forward import centralized_forward, decentralized_forward, verify_equivalence
-
-_original_forward = model_2.node_update.forward
-
-
-def _dispatch(self, user_feature, e, user_index, e_dir,
-              training=True, duplicate=False):
-    if duplicate:
-        raise NotImplementedError("fast_forward does not implement the duplicate=True pruning path")
-    if training:
-        return centralized_forward(self, user_feature, e, user_index, e_dir)
-    return decentralized_forward(self, user_feature, e, user_index, e_dir)
+from model import load_checkpoint
 
 
 def main():
@@ -45,7 +23,6 @@ def main():
     p.add_argument("--test_sample_final", type=int, default=3200)
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--out_dir", default="results_long_training")
-    p.add_argument("--skip_check", action="store_true")
     p.add_argument("--resume", default=None,
                    help="checkpoint to warm start from; accepts a plain state_dict or "
                         "a resumable bundle that also carries the optimizer state")
@@ -77,29 +54,15 @@ def main():
     trainer = Trainer(args.M, args.N, args.L, args.K, args.batch_size,
                       args.pmax_dbm, device=args.device)
 
-    if not args.skip_check:
-        # Record the equivalence evidence in this run's own log before switching.
-        report = verify_equivalence(trainer.model, trainer.dataloader, args.K,
-                                    trainer.training_associate_threshold, trainer.device)
-        print("[check] fast vs original forward:", json.dumps(report))
-        if not report["outputs_match"]:
-            raise SystemExit("fast forward does not match the original; aborting")
-
     opt_state, start_iter = None, 0
     if args.resume:
-        bundle = torch.load(args.resume, map_location=args.device)
+        bundle = load_checkpoint(trainer.model, args.resume, trainer.device)
         if isinstance(bundle, dict) and "model" in bundle:
-            trainer.model.load_state_dict(bundle["model"])
             opt_state = bundle.get("optimizer")
             start_iter = int(bundle.get("iteration", 0))
-        else:
-            # Plain state_dict, e.g. the trainer's own model_final_run0.pt. Adam
-            # restarts its moment estimates, which costs a short transient.
-            trainer.model.load_state_dict(bundle)
         print(f"[resume] {args.resume} (iteration {start_iter}, "
               f"optimizer state {'restored' if opt_state else 'NOT available'})")
 
-    model_2.node_update.forward = _dispatch
     trainer.n_iter = args.n_iter
     trainer.log_eval_interval = args.log_eval_interval
 

@@ -46,6 +46,7 @@ def main():
 
     import trainer_2
     from data import MyDataLoader
+    from model import load_checkpoint
     from ris_action_variants import VariantNet, circular_consensus
     from eval_variant import deterministic_state
 
@@ -67,7 +68,7 @@ def main():
         model = VariantNet(cfg["M"], cfg["N"], cfg["L"], cfg["D"], pmax_w, cfg["ch"], cfg["AP"],
                            device, arch=cfg["arch"], identity=cfg["identity"],
                            consensus=consensus, tau=cfg["tau"], ris_loc=dl.RIS_Loc_array).to(device)
-        model.load_state_dict(torch.load(ckpt, map_location=device))
+        load_checkpoint(model, ckpt, device)
         model.eval()
 
         deterministic_state(args.eval_seed)

@@ -25,7 +25,7 @@ import torch
 import torch.nn.functional as F
 
 from data import MyDataLoader
-from model_2 import node_update
+from model import BaselineNet, load_checkpoint
 from utils_return_indivial_rates import discrete_mapping
 from discrete_cd_baseline import RatePrecompute
 
@@ -145,9 +145,9 @@ def main():
     dataloader = MyDataLoader(args.M, args.N, args.L, args.batch_size)
     dataloader.BS_RIS_association()
     pmax_w = 10 ** ((args.pmax_dbm - 30) / 10)
-    model = node_update(args.M, args.N, args.L, args.D, pmax_w, 2, args.ch,
+    model = BaselineNet(args.M, args.N, args.L, args.D, pmax_w, args.ch,
                         args.num_ap, device).to(device)
-    model.load_state_dict(torch.load(args.ckpt, map_location=device))
+    load_checkpoint(model, args.ckpt, device)
     model.eval()
 
     keys = ["gnn", "gnn_round", "phase_only", "phase_only_q",
