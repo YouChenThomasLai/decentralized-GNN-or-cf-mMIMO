@@ -146,10 +146,9 @@ comparing the selected centralized and decentralized methods. Pass the input
 workbook, x-axis label, and output path with `--excel`, `--x-label`, and
 `--output-base`.
 
-The Stage 0 parameter sweeps are defined in `stage0/run_exp-v2.sh`. Stage 1
-and Stage 2 keep their own source, scripts, and local results under
-`stage1/` and `stage2/`; research notes and reference material are under
-`doc/`.
+The Stage 0 parameter sweeps are defined in `stage0/run_exp-v2.sh`. Frozen
+network-scaling prototypes live under `snapshot_network_scaling/`; research
+notes and reference material are under `doc/`.
 
 ## Development checks
 

@@ -63,7 +63,7 @@
 
 ## 3. stage0 原始碼完整性
 
-`git log --all -- "code/stage0/*.py"` 只有一個 commit `b712cb1`（2026-08-20），且所有檔案均為新增（`A`）而非修改；`git status code/stage0` 乾淨。Stage 1–5 使用的是獨立複本（`code/snapshot_network_scaling/stage0/`、`code/snapshot_network_scaling/v2_bpp/stage0/`、`code/stage2/` 等，`data.py` 的 md5 各不相同），因此後續工作沒有回寫 stage0。
+`git log --all -- "code/stage0/*.py"` 只有一個 commit `b712cb1`（2026-08-20），且所有檔案均為新增（`A`）而非修改；`git status code/stage0` 乾淨。已移除的後續 Stage 1–5 使用獨立複本，且當時比對的 `data.py` md5 各不相同；目前保留的 `code/snapshot_network_scaling/stage0/` 與 `code/snapshot_network_scaling/v2_bpp/stage0/` 也未回寫 stage0。
 
 需留存的疑點：`data.py`、`trainer_2.py`、`utils_return_indivial_rates.py` 的 mtime 為 2026-08-17，晚於結果產生時間 2026-08-13，而 git 歷史自 08-20 才開始，故該次編輯的 diff 無法由版本控制還原。`code/stage0/doc.txt` 記載該 cleanup「yields the exact same result as in the first paper submission」。第 6 節的重現性重跑為此宣稱提供了實證支持。
 
@@ -404,7 +404,7 @@ $$\text{rate}(W_{\text{GNN}}, \theta_{\text{greedy}}) \;\le\; \max_{\theta} \tex
 1. continuous-phase 的 near-optimal ceiling（WMMSE／FP 搭配 manifold optimization，即參考文獻 [3]–[8] 的標準做法），用以界定貪婪搜尋的 14.06 距離真正的聯合最佳還有多遠。
 2. §9.3 排序翻轉的成因診斷（是否源於 GNN beamformer 對其自身低品質相位的共適應）。
 3. GNN 相位品質不佳的成因分離：訓練未收斂（已有證據）／架構表達力不足／實作瑕疵（masked max、未使用的 `edge_update`、no-op pruning）三者尚未區分。
-4. MRT／RZF 搭配優化或隨機 RIS 的古典參考點（`code/stage1/`、`code/stage5/` 已有可移植的實作）。
+4. MRT／RZF 搭配優化或隨機 RIS 的古典參考點。
 
 ## 13. Reproducibility 與環境
 

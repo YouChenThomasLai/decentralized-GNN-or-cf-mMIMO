@@ -40,11 +40,11 @@ Stage 1C據此採用：
 - 至少200 AP topology seeds × 每seed100 UE drops的training-free geometry gate；
 - topology-matched checkpoint與AP-layout lineage。
 
-這些implementation lessons已進入`doc/decentralized_active_csi_experiment_plan.md`與Stage 1C code；舊scaling plan不再需要存在。
+這些 implementation lessons 留存於本文件；舊 scaling plan 與 Stage 1 code 已移除。
 
 ## 4. Future scaling gate
 
-只有最終paper claim明確包含network-size scalability/generalization時，Stage 7才新增一個secondary axis。新gate必須固定density或明確說明fixed-area scaling、使用多個AP layouts、分離topology與training seeds，並重新訓練或提供可辯護的cross-size model contract。
+只有最終 paper claim 明確包含 network-size scalability/generalization 時，才新增一個 secondary axis。新 gate 必須固定 density 或明確說明 fixed-area scaling、使用多個 AP layouts、分離 topology 與 training seeds，並重新訓練或提供可辯護的 cross-size model contract。
 
 ## 5. Artifact locator
 
