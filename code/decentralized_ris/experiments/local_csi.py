@@ -12,25 +12,15 @@ that the paper setting matches the normal decentralized forward path.
 import argparse
 import json
 import os
-import random
 
 import numpy as np
 import torch
 
-from simulation import ChannelSimulator
+from evaluate import resolve_device, seed_everything
+from experiments.discrete_cd import coordinate_descent
 from model import BaselineNet, load_checkpoint
 from rates import RatePrecompute, phase_levels, quantize_phase
-from discrete_cd_baseline import coordinate_descent
-
-
-def set_seed(seed):
-    random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
+from simulation import ChannelSimulator
 
 
 def decentralized_forward(model, user_feature, e, user_index, e_dir, include_cross_ap_csi):
@@ -86,8 +76,8 @@ def main():
     p.add_argument("--out_dir", default="results_local_csi_ablation")
     args = p.parse_args()
 
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    set_seed(args.seed)
+    device = resolve_device(args.device)
+    seed_everything(args.seed)
 
     dataloader = ChannelSimulator(
         args.M, args.N, args.L, args.batch_size, n_ap=args.num_ap

@@ -45,7 +45,7 @@ def main():
     args = p.parse_args()
 
     from simulation import ChannelSimulator
-    from evaluate import checkpoint_path, seed_everything
+    from evaluate import checkpoint_path, resolve_device, seed_everything
     from model import load_checkpoint
     from variants import VariantNet, circular_consensus
 
@@ -63,7 +63,7 @@ def main():
             cfg["M"], cfg["N"], cfg["L"], cfg["batch_size"], n_ap=cfg["AP"]
         )
         pmax_w = 10 ** ((cfg["pmax_dbm"] - 30) / 10)
-        device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+        device = resolve_device(args.device)
         consensus = cfg["consensus"] or ("wreduce" if cfg["arch"] == "r0" else "equal")
         model = VariantNet(cfg["M"], cfg["N"], cfg["L"], cfg["D"], pmax_w, cfg["ch"], cfg["AP"],
                            device, arch=cfg["arch"], identity=cfg["identity"],

@@ -1,6 +1,6 @@
 """Continuous-phase achievable reference for a trained decentralized RIS checkpoint.
 
-The greedy 2-bit search in `discrete_cd_baseline.py` lower-bounds the joint
+The greedy 2-bit search in `experiments/discrete_cd.py` lower-bounds the joint
 optimum three times over: it is a coordinate-wise local optimum, it is confined
 to the 2-bit grid, and it holds the beamformer fixed. This script removes the
 last two restrictions by optimizing the true sum rate directly with Adam:
@@ -18,23 +18,15 @@ modified; the checkpoint is read only.
 import argparse
 import json
 import os
-import random
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from simulation import ChannelSimulator
+from evaluate import resolve_device, seed_everything
 from model import BaselineNet, load_checkpoint
 from rates import RatePrecompute, quantize_phase
-
-
-def set_seed(seed):
-    random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+from simulation import ChannelSimulator
 
 
 def apply_power_constraint(W_raw, mask, alpha_logit, pmax, num_ap):
@@ -138,8 +130,8 @@ def main():
     p.add_argument("--out_dir", default="results_continuous_ceiling")
     args = p.parse_args()
 
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    set_seed(args.seed)
+    device = resolve_device(args.device)
+    seed_everything(args.seed)
 
     dataloader = ChannelSimulator(
         args.M, args.N, args.L, args.batch_size, n_ap=args.num_ap
