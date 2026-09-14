@@ -20,9 +20,9 @@ import time
 import numpy as np
 import torch
 
-import ris_action_variants as rav
+import variants as rav
 from model import load_checkpoint
-from ris_action_variants import VariantNet, unit_modulus_error
+from variants import VariantNet, unit_modulus_error
 
 
 def parse_args():
@@ -63,11 +63,12 @@ def parse_args():
 
 def gate_report(model, trainer, K):
     """Functional gate: finite outputs, unit modulus, and a live backward pass."""
-    uf, e, ui, ed, _ = trainer.dataloader.gen_training_data(
-        K, trainer.training_associate_threshold, trainer.associate_threshold, duplicate=False)
+    uf, e, ui, ed, _ = trainer.dataloader.training_batch(
+        K, trainer.training_associate_threshold, trainer.associate_threshold
+    )
     uf, e, ed = uf.to(model.device), e.to(model.device), ed.to(model.device)
     W, theta = model(uf, e, np.array(ui, dtype=bool), ed, training=True)
-    loss, sum_rate, _ = trainer.dataloader.compute_loss(W, theta, trainer.pmax_w, trainer.device)
+    loss, sum_rate, _ = trainer.dataloader.loss(W, theta, trainer.device)
     loss.backward()
     gnorm = torch.sqrt(sum((p.grad.detach() ** 2).sum() for p in model.parameters()
                            if p.grad is not None)).item()
@@ -78,15 +79,15 @@ def gate_report(model, trainer, K):
            "unit_modulus_error": unit_modulus_error(theta), "sum_rate": float(sum_rate),
            "grad_norm": gnorm, "tensors_with_nonzero_grad": n_with_grad, "tensors_total": n_params_t}
 
-    ufd, ed_, uid, edd = trainer.dataloader.gen_testing_data(
+    ufd, ed_, uid, edd = trainer.dataloader.decentralized_batch(
         K, trainer.associate_threshold, trainer.associate_threshold,
-        duplicate=False, regenerate_channels=False)
+        regenerate_channels=False)
     ufd = [t.to(model.device) for t in ufd]
     ed_ = [t.to(model.device) for t in ed_]
     edd = [t.to(model.device) for t in edd]
     with torch.no_grad():
         Wd, thd = model(ufd, ed_, uid, edd, training=False)
-        _, sr_d, _ = trainer.dataloader.compute_loss(Wd, thd, trainer.pmax_w, trainer.device)
+        _, sr_d, _ = trainer.dataloader.loss(Wd, thd, trainer.device)
     dec = {"W_finite": bool(torch.isfinite(Wd).all()), "theta_finite": bool(torch.isfinite(thd).all()),
            "unit_modulus_error": unit_modulus_error(thd), "sum_rate": float(sr_d)}
     return {"centralized": cen, "decentralized": dec}
@@ -125,7 +126,8 @@ def main():
     model = VariantNet(args.M, args.N, args.L, args.D, trainer.pmax_w, args.ch, args.AP,
                        device, arch=args.arch, identity=args.identity,
                        consensus=consensus, tau=args.tau,
-                       ris_loc=trainer.dataloader.RIS_Loc_array).to(device)
+                       ris_loc=trainer.dataloader.ris_locations,
+                       users_per_ap=args.K).to(device)
     trainer.model = model
     desc = model.describe()
     print(f"[cfg] {tag}: {json.dumps(desc)}")

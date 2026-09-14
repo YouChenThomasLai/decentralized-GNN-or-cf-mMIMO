@@ -4,9 +4,9 @@ import tempfile
 import numpy as np
 import torch
 
-from data import MyDataLoader
+from simulation import ChannelSimulator
 from model import BaselineNet, load_checkpoint
-from ris_action_variants import VariantNet
+from variants import VariantNet
 
 
 def test_forward_equivalence():
@@ -14,20 +14,19 @@ def test_forward_equivalence():
     torch.manual_seed(0)
     device = torch.device("cpu")
     pmax = 10 ** ((15 - 30) / 10)
-    dataloader = MyDataLoader(2, 30, 4, 2)
-    dataloader.BS_RIS_association()
+    dataloader = ChannelSimulator(2, 30, 4, 2)
 
     baseline = BaselineNet(2, 30, 4, 6, pmax, 64, 5, device).to(device)
     variant = VariantNet(2, 30, 4, 6, pmax, 64, 5, device, arch="r0").to(device)
     variant.load_state_dict(baseline.state_dict(), strict=True)
 
-    features, edges, masks, direct, _ = dataloader.gen_training_data(8, 0.1, 0.1)
+    features, edges, masks, direct, _ = dataloader.training_batch(8, 0.1, 0.1)
     with torch.no_grad():
         expected = baseline.centralized(features, edges, masks, direct)
         actual = variant.centralized(features, edges, masks, direct)
     assert all(torch.equal(a, b) for a, b in zip(expected, actual))
 
-    features, edges, masks, direct = dataloader.gen_testing_data(
+    features, edges, masks, direct = dataloader.decentralized_batch(
         8, 0.1, 0.1, regenerate_channels=False
     )
     with torch.no_grad():

@@ -1,9 +1,9 @@
 import torch
 
-from utils_return_indivial_rates import discrete_mapping
+from rates import quantize_phase
 
 
-def test_discrete_mapping():
+def test_phase_quantization():
     theta = torch.tensor(
         [[[[0.9, 0.1], [-0.1, 0.9], [-0.9, -0.1], [0.1, -0.9]]]]
     )
@@ -12,7 +12,7 @@ def test_discrete_mapping():
         [[[[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]]]]
     )
 
-    mapped = discrete_mapping(theta, num_bits=2)
+    mapped = quantize_phase(theta, num_bits=2)
 
     assert torch.equal(theta, original)
     assert mapped.data_ptr() != theta.data_ptr()
@@ -20,4 +20,4 @@ def test_discrete_mapping():
 
 
 if __name__ == "__main__":
-    test_discrete_mapping()
+    test_phase_quantization()

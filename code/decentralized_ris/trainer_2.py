@@ -6,9 +6,9 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from data import MyDataLoader
+from simulation import ChannelSimulator
 from model import BaselineNet
-from utils_return_indivial_rates import discrete_mapping
+from rates import quantize_phase, random_phase_like
 
 # -------------------------------
 # FULL DETERMINISM SETUP
@@ -35,15 +35,6 @@ print(f"[INFO] All random seeds fixed to {SEED} for full determinism.")
 torch.autograd.set_detect_anomaly(False)
 
 
-def _random_phase_like(theta, num_bits=None):
-    if num_bits is None:
-        phase = 2 * torch.pi * torch.rand_like(theta[..., 0])
-    else:
-        level = 2 ** num_bits
-        phase = torch.randint(level, theta.shape[:-1], device=theta.device)
-        phase = phase.to(theta.dtype) * (2 * torch.pi / level)
-    return torch.stack((phase.cos(), phase.sin()), dim=-1)
-
 class Trainer():
     def __init__(self,M,N,L,K,batch_size,pmax_dbm=10.0, device="cuda:0"):
         self.M = M                            # num of antennas per AP
@@ -54,38 +45,41 @@ class Trainer():
         self.pmax_w = 10 ** ((pmax_dbm - 30) / 10)
         self.batch_size = batch_size
         self.n_iter = 2000
-        self.dataloader = MyDataLoader(M,N,L,batch_size)
-        self.dataloader.BS_RIS_association()
-        self.device = torch.device(device if torch.cuda.is_available() else "cpu")          
+        self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.num_of_AP = 5
-        self.model = BaselineNet(M, N, L, 6, self.pmax_w, 64, self.num_of_AP, self.device).to(self.device)
+        self.dataloader = ChannelSimulator(M, N, L, batch_size, n_ap=self.num_of_AP)
+        self.model = BaselineNet(
+            M, N, L, 6, self.pmax_w, 64, self.num_of_AP, self.device,
+            users_per_ap=K,
+        ).to(self.device)
         print(f"[INFO] Per-AP Pmax = {self.pmax_dbm:g} dBm = {self.pmax_w:g} W.")
         self.min_rate = 1
         self.log_interval = 10
-        self.log_eval_interval = 500 
+        self.log_eval_interval = 500
 
         self.training_associate_threshold = 0.1
         self.associate_threshold = 0.1
-        self.dup = False                             
         self.sum_UE = np.zeros((self.num_of_AP))
 
     def train_batch(self):
         self.model.train()
-        user_feature, e, user_index, e_dir, user_index_for_testing = self.dataloader.gen_training_data(self.K,self.training_associate_threshold,self.associate_threshold,duplicate=self.dup)
+        user_feature, e, user_index, e_dir, user_index_for_testing = self.dataloader.training_batch(
+            self.K, self.training_associate_threshold, self.associate_threshold
+        )
         user_feature = user_feature.to(self.device)
         e = e.to(self.device)
         e_dir = e_dir.to(self.device)
         for AP in range(self.num_of_AP):
             sum_of_ue = np.sum(user_index_for_testing[AP])
             self.sum_UE[AP] += sum_of_ue
-            
+
         self.opt.zero_grad()
-        W, theta = self.model(user_feature,e,user_index,e_dir,training=True,duplicate=self.dup)
-        loss,sum_rate,rate  = self.dataloader.compute_loss(W,theta,self.pmax_w, self.device)
+        W, theta = self.model(user_feature, e, user_index, e_dir, training=True)
+        loss,sum_rate,rate  = self.dataloader.loss(W,theta, self.device)
         loss.backward()
         self.opt.step()
 
-        return loss.item(),sum_rate.item(),rate.detach().cpu()  
+        return loss.item(),sum_rate.item(),rate.detach().cpu()
 
 
 
@@ -100,7 +94,7 @@ class Trainer():
         os.makedirs(out_dir, exist_ok=True)  # make results directory if not exists
 
         writer = SummaryWriter(log_dir=log_dir)
-        
+
         self.opt = torch.optim.Adam(self.model.parameters(),lr=0.0001,weight_decay=1e-6)
         train_loss = []
         train_sum_rate = []
@@ -127,7 +121,7 @@ class Trainer():
             # TensorBoard
             writer.add_scalar("Train/Loss", loss, i)
             writer.add_scalar("Train/SumRate", sum_rate, i)
-            
+
             for user_id, val in enumerate(rate):
                 writer.add_scalar(f"UserRate/User_{user_id+1}", val, i)
 
@@ -135,7 +129,7 @@ class Trainer():
                 print(f"[Train | {i}/{self.n_iter} ] loss = {np.mean(train_loss):.5f}, sum rate = {(np.mean(train_sum_rate)):.5f}")  #! I added sum_rate printing out
                 writer.add_scalar("Train/np.mean(train_loss) Hank's ", np.mean(train_loss), i)
                 writer.add_scalar("Train/np.mean(train_sum_rate) Hank's ", np.mean(train_sum_rate), i)
-                
+
                 train_total.append(np.mean(train_loss))
                 train_loss = []
                 train_sum_rate = []
@@ -147,7 +141,7 @@ class Trainer():
                 print(f"[Val Cen. + Discrete | {i+1}/{self.n_iter} ] sum rate = {(centralized_discrete):.5f}")
                 print(f"[Val Cen. + Random Phase | {i+1}/{self.n_iter} ] sum rate = {(centralized_random_phase):.5f}")
                 print(f"[Val Cen. + Random Phase + Discrete| {i+1}/{self.n_iter} ] sum rate = {(centralized_random_phase_discrete):.5f}")
-                
+
                 print(f"[Val Decen. | {i+1}/{self.n_iter} ] sum rate = {(decentralized):.5f}")
                 print(f"[Val Decen. + Discrete | {i+1}/{self.n_iter} ] sum rate = {(decentralized_discrete):.5f}")
                 print(f"[Val Decen. + Random Phase | {i+1}/{self.n_iter} ] sum rate = {(decentralized_random_phase):.5f}")
@@ -162,7 +156,7 @@ class Trainer():
                 val_sum_rate_decentralized_random_phase.append(decentralized_random_phase)
                 val_sum_rate_decentralized_random_phase_discrete.append(decentralized_random_phase_discrete)
 
-                
+
                 # Log validation metrics
                 writer.add_scalar("Val/Centralized", centralized, i+1)
                 writer.add_scalar("Val/Centralized_Discrete", centralized_discrete, i+1)
@@ -184,7 +178,7 @@ class Trainer():
               f"Decen.+Discrete = {decentralized_discrete:.5f}, "
               f"Decen.+Rand = {decentralized_random_phase:.5f}, "
               f"Decen.+Rand+Discrete = {decentralized_random_phase_discrete:.5f}, ")
-        
+
 
         # save into arrays for later analysis
         final_eval_results = {
@@ -228,7 +222,7 @@ class Trainer():
         np.save(os.path.join(array_dir, f"val_sum_rate_decentralized_random_phase_discrete_run{run_id}.npy"), np.array(val_sum_rate_decentralized_random_phase_discrete))
 
     def eval(self,test_sample,sigma,itera):
-        
+
         self.model.eval()
         with torch.no_grad():                                      #! my addition
             iteration = int(test_sample/self.batch_size)
@@ -245,37 +239,38 @@ class Trainer():
 
             for i in range(iteration):
 
-                user_feature, e, user_index, e_dir, user_index_testing = self.dataloader.gen_training_data(self.K,self.training_associate_threshold,self.associate_threshold,duplicate=self.dup)
+                user_feature, e, user_index, e_dir, user_index_testing = self.dataloader.training_batch(
+                    self.K, self.training_associate_threshold, self.associate_threshold
+                )
                 user_feature = user_feature.to(self.device)
                 e = e.to(self.device)
                 e_dir = e_dir.to(self.device)
-                
+
                 # Centralized (C)
-                W, theta = self.model(user_feature,e,user_index,e_dir,training=True,duplicate=self.dup)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.pmax_w, self.device)
+                W, theta = self.model(user_feature, e, user_index, e_dir, training=True)
+                loss,sum_rate,rate = self.dataloader.loss(W,theta, self.device)
                 sum_rate_array_centralized.append(sum_rate.item())
 
                 # Centralized (D)
-                theta_discrete = discrete_mapping(theta,num_bits)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta_discrete,self.pmax_w, self.device)
+                theta_discrete = quantize_phase(theta,num_bits)
+                loss,sum_rate,rate = self.dataloader.loss(W,theta_discrete, self.device)
                 sum_rate_array_centralized_discrete.append(sum_rate.item())
 
                 # Centralized (C, continuous random)  Note: not included in paper
-                theta = _random_phase_like(theta)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.pmax_w, self.device)
+                theta = random_phase_like(theta)
+                loss,sum_rate,rate = self.dataloader.loss(W,theta, self.device)
                 sum_rate_array_centralized_random_phase.append(sum_rate.item())
 
                 # Centralized (D-R)
-                theta_rand_discrete = _random_phase_like(theta, num_bits)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta_rand_discrete,self.pmax_w, self.device)
+                theta_rand_discrete = random_phase_like(theta, num_bits)
+                loss,sum_rate,rate = self.dataloader.loss(W,theta_rand_discrete, self.device)
                 sum_rate_array_centralized_random_phase_discrete.append(sum_rate.item())
 
                 # Decentralized (C)
-                user_feature, e, user_index, e_dir = self.dataloader.gen_testing_data(
+                user_feature, e, user_index, e_dir = self.dataloader.decentralized_batch(
                     self.K,
                     self.associate_threshold,
                     self.associate_threshold,
-                    duplicate=False,
                     regenerate_channels=False,
                 )
                 for num_BS in range(len(user_feature)):
@@ -283,22 +278,22 @@ class Trainer():
                     e[num_BS] = e[num_BS].to(self.device)
                     e_dir[num_BS] = e_dir[num_BS].to(self.device)
                 W, theta = self.model(user_feature,e,user_index,e_dir,training=False)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.pmax_w, self.device)
+                loss,sum_rate,rate = self.dataloader.loss(W,theta, self.device)
                 sum_rate_array_decentralized.append(sum_rate.item())
 
                 # Decentralized (D)
-                theta_discrete = discrete_mapping(theta,num_bits)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta_discrete,self.pmax_w, self.device)
+                theta_discrete = quantize_phase(theta,num_bits)
+                loss,sum_rate,rate = self.dataloader.loss(W,theta_discrete, self.device)
                 sum_rate_array_decentralized_discrete.append(sum_rate.item())
 
                 # Decentralized (C, continuous random)  Note: not included in paper
-                theta = _random_phase_like(theta)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta,self.pmax_w, self.device)
+                theta = random_phase_like(theta)
+                loss,sum_rate,rate = self.dataloader.loss(W,theta, self.device)
                 sum_rate_array_decentralized_random_phase.append(sum_rate.item())
 
                 # Decentralized (D-R)
-                theta_rand_discrete = _random_phase_like(theta, num_bits)
-                loss,sum_rate,rate = self.dataloader.compute_loss(W,theta_rand_discrete,self.pmax_w, self.device)
+                theta_rand_discrete = random_phase_like(theta, num_bits)
+                loss,sum_rate,rate = self.dataloader.loss(W,theta_rand_discrete, self.device)
                 sum_rate_array_decentralized_random_phase_discrete.append(sum_rate.item())
 
             return np.mean(sum_rate_array_centralized), np.mean(sum_rate_array_centralized_random_phase),\
@@ -324,7 +319,7 @@ if __name__ == '__main__':
     )
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--runs", type=int, default=5, help="Number of training runs")
-    
+
     parser.add_argument("--bs_file", type=str, default="BS_{i}.txt", help="BS output filename pattern")
     parser.add_argument("--ris_file", type=str, default="RIS_{i}.txt", help="RIS output filename pattern")
     parser.add_argument("--user_file", type=str, default="USER_{i}.txt", help="User output filename pattern")
@@ -351,9 +346,9 @@ if __name__ == '__main__':
                           args.K,
                           args.batch_size,
                           args.pmax_dbm,
-                          device=args.device)       
-        BS.append(trainer.dataloader.BS_Loc_array)
-        RIS.append(trainer.dataloader.RIS_Loc_array)
+                          device=args.device)
+        BS.append(trainer.dataloader.ap_locations)
+        RIS.append(trainer.dataloader.ris_locations)
 
         array_dir = os.path.join(base_dir, "arrays")
         os.makedirs(array_dir, exist_ok=True)
@@ -361,7 +356,7 @@ if __name__ == '__main__':
         bs_filename   = os.path.join(array_dir, args.bs_file.format(i=i))
         ris_filename  = os.path.join(array_dir, args.ris_file.format(i=i))
 
-        np.savetxt(bs_filename, trainer.dataloader.BS_Loc_array, fmt='%f')
-        np.savetxt(ris_filename, trainer.dataloader.RIS_Loc_array, fmt='%f')
+        np.savetxt(bs_filename, trainer.dataloader.ap_locations, fmt='%f')
+        np.savetxt(ris_filename, trainer.dataloader.ris_locations, fmt='%f')
 
         trainer.train(run_id=i, out_dir=out_dir, log_dir=log_dir, test_sample_val = args.test_sample_val, test_sample_final = args.test_sample_final)

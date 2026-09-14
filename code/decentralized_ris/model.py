@@ -143,16 +143,15 @@ class BeamformerReadout(nn.Module):
 
 
 class RisReadoutAp(nn.Module):
-    def __init__(self,M,N,L,Pt,in_dim, in_dim2):
+    def __init__(self, M, N, L, Pt, in_dim, edge_dim):
         super().__init__()
         self.M = M
         self.N = N
         self.L = L
         self.Pt = Pt
         self.in_dim = in_dim
-        self.in_dim2 = in_dim2
         self.f = nn.Linear(self.in_dim,self.N*2)
-        self.fe_AP = nn.Linear(32,self.N*2)                        #! 32 is hard coded, TODO: make this dynamic
+        self.fe_AP = nn.Linear(edge_dim, self.N * 2)
         self.f_merge = nn.Linear(self.N*4,self.N*2)
 
     def forward(self, rl, e_AP):
@@ -222,7 +221,7 @@ class PowerControl(nn.Module):
 
 
 class BaselineNet(nn.Module):
-    def __init__(self, M, N, L, D, Pmax, ch, AP, device):
+    def __init__(self, M, N, L, D, Pmax, ch, AP, device, users_per_ap=8):
         super().__init__()
         self.device = device
         self.N = N
@@ -241,14 +240,12 @@ class BaselineNet(nn.Module):
             [PowerControl(M, N, L, Pmax, node_dim) for _ in range(AP)]
         )
         self.RIS_readout_AP_list = nn.ModuleList(
-            [RisReadoutAp(M, N, L, Pmax, node_dim, in_dim2=None) for _ in range(AP)]
+            [RisReadoutAp(M, N, L, Pmax, node_dim, L * users_per_ap) for _ in range(AP)]
         )
         self.RIS_merge = RisMerge(N)
         self.BS_readout = BeamformerReadout(M, N, L, Pmax, node_dim)
 
-    def forward(self, user_feature, edges, user_index, direct_edges, training=True, duplicate=False):
-        if duplicate:
-            raise NotImplementedError("duplicate pruning is not supported")
+    def forward(self, user_feature, edges, user_index, direct_edges, training=True):
         if training:
             return self.centralized(user_feature, edges, user_index, direct_edges)
         return self.decentralized(user_feature, edges, user_index, direct_edges)

@@ -45,9 +45,9 @@ def main():
     args = p.parse_args()
 
     import trainer_2
-    from data import MyDataLoader
+    from simulation import ChannelSimulator
     from model import load_checkpoint
-    from ris_action_variants import VariantNet, circular_consensus
+    from variants import VariantNet, circular_consensus
     from eval_variant import deterministic_state
 
     report = {}
@@ -60,14 +60,16 @@ def main():
             continue
 
         deterministic_state(cfg["seed"])
-        dl = MyDataLoader(cfg["M"], cfg["N"], cfg["L"], cfg["batch_size"])
-        dl.BS_RIS_association()
+        dl = ChannelSimulator(
+            cfg["M"], cfg["N"], cfg["L"], cfg["batch_size"], n_ap=cfg["AP"]
+        )
         pmax_w = 10 ** ((cfg["pmax_dbm"] - 30) / 10)
         device = torch.device(args.device if torch.cuda.is_available() else "cpu")
         consensus = cfg["consensus"] or ("wreduce" if cfg["arch"] == "r0" else "equal")
         model = VariantNet(cfg["M"], cfg["N"], cfg["L"], cfg["D"], pmax_w, cfg["ch"], cfg["AP"],
                            device, arch=cfg["arch"], identity=cfg["identity"],
-                           consensus=consensus, tau=cfg["tau"], ris_loc=dl.RIS_Loc_array).to(device)
+                           consensus=consensus, tau=cfg["tau"], ris_loc=dl.ris_locations,
+                           users_per_ap=cfg["K"]).to(device)
         load_checkpoint(model, ckpt, device)
         model.eval()
 
@@ -79,16 +81,17 @@ def main():
 
         with torch.no_grad():
             for _ in range(args.samples // cfg["batch_size"]):
-                dl.gen_training_data(cfg["K"], 0.1, 0.1, duplicate=False)
-                ufd, e_, uid, edd = dl.gen_testing_data(cfg["K"], 0.1, 0.1, duplicate=False,
-                                                        regenerate_channels=False)
+                dl.training_batch(cfg["K"], 0.1, 0.1)
+                ufd, e_, uid, edd = dl.decentralized_batch(
+                    cfg["K"], 0.1, 0.1, regenerate_channels=False
+                )
                 ufd = [t.to(device) for t in ufd]
                 e_ = [t.to(device) for t in e_]
                 edd = [t.to(device) for t in edd]
 
                 tr = {}
                 W, th = model.decentralized(ufd, e_, uid, edd, trace=tr)
-                _, sr, _ = dl.compute_loss(W, th, pmax_w, device)
+                _, sr, _ = dl.loss(W, th, device)
                 acc["rate"].append(float(sr))
 
                 w = tr["weights"]                                   # (B, A, R)
@@ -101,7 +104,7 @@ def main():
                 acc["rho"].append(float(res.norm(dim=-1).mean()))
 
                 if "theta_equal" in tr:
-                    _, sr_e, _ = dl.compute_loss(W, tr["theta_equal"], pmax_w, device)
+                    _, sr_e, _ = dl.loss(W, tr["theta_equal"], device)
                     acc["rate_equal"].append(float(sr_e))
 
                 # Leave-one-AP-out: drop AP l's vote only (its beamformer stays),
@@ -114,7 +117,7 @@ def main():
                             continue
                         th_l, _ = circular_consensus(tr["proposals"], keep,
                                                      tr["logits"], model.tau)
-                        _, sr_l, _ = dl.compute_loss(W, th_l, pmax_w, device)
+                        _, sr_l, _ = dl.loss(W, th_l, device)
                         loo_gain.append(float(sr) - float(sr_l))
                         loo_conf.append(float((w[:, l, :] * act[:, l:l + 1]).mean()))
 

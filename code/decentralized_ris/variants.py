@@ -15,7 +15,7 @@ representation, the AP output interface and the aggregation:
               context in the AP-UE update
 
 `r0` reuses `model`'s submodules under their original attribute names, so an
-existing checkpoint remains compatible and `verify_r0_equivalence` checks it.
+existing checkpoint remains compatible.
 
 Shapes follow `model`: B batch, R RIS, K total AP-UE nodes (= AP x users
 per AP), A APs.
@@ -219,7 +219,8 @@ class VariantNet(nn.Module):
     """GNN with a configurable RIS representation and action path."""
 
     def __init__(self, M, N, L, D, Pmax, ch, AP, device,
-                 arch="r0", identity="none", consensus=None, tau=1.0, ris_loc=None):
+                 arch="r0", identity="none", consensus=None, tau=1.0, ris_loc=None,
+                 users_per_ap=8):
         super().__init__()
         assert arch in ARCHS, arch
         if consensus is None:
@@ -261,7 +262,7 @@ class VariantNet(nn.Module):
         # --- RIS action path --------------------------------------------------
         if self.ris_node:
             self.RIS_readout_AP_list = nn.ModuleList(
-                [model.RisReadoutAp(M, N, L, Pmax, node_dim, in_dim2=None) for _ in range(AP)])
+                [model.RisReadoutAp(M, N, L, Pmax, node_dim, L * users_per_ap) for _ in range(AP)])
             if arch == "r0":
                 self.RIS_merge = model.RisMerge(N)
             elif consensus == "confidence":
@@ -351,10 +352,7 @@ class VariantNet(nn.Module):
         return theta
 
     # --------------------------------------------------------------- forwards
-    def forward(self, user_feature, e, user_index, e_dir,
-                training=True, duplicate=False):
-        if duplicate:
-            raise NotImplementedError("the variant nets do not implement the duplicate pruning path")
+    def forward(self, user_feature, e, user_index, e_dir, training=True):
         if training:
             return self.centralized(user_feature, e, user_index, e_dir)
         return self.decentralized(user_feature, e, user_index, e_dir)
@@ -442,42 +440,3 @@ class VariantNet(nn.Module):
 
         theta = self._merge(latents, proposals, confs, ap_active.to(W.dtype), trace)
         return W, theta
-
-
-def build_model(args_like, device, ris_loc=None):
-    """Construct a `VariantNet` from an argparse namespace."""
-    return VariantNet(args_like.M, args_like.N, args_like.L, args_like.D,
-                      args_like.pmax_w, args_like.ch, args_like.AP, device,
-                      arch=args_like.arch, identity=args_like.identity,
-                      consensus=args_like.consensus, tau=args_like.tau, ris_loc=ris_loc)
-
-
-def verify_r0_equivalence(dataloader, K, threshold, device, atol=0.0):
-    """`VariantNet(arch='r0')` must reproduce `BaselineNet`."""
-    ref = model.BaselineNet(2, 30, 4, 6, torch.tensor(0.0316228), 64, 5, device).to(device)
-    var = VariantNet(2, 30, 4, 6, torch.tensor(0.0316228), 64, 5, device, arch="r0").to(device)
-    missing, unexpected = var.load_state_dict(ref.state_dict(), strict=True), None
-
-    uf, e, ui, ed, _ = dataloader.gen_training_data(K, threshold, threshold, duplicate=False)
-    uf, e, ed = uf.to(device), e.to(device), ed.to(device)
-    ui_a = np.array(ui, dtype=bool)
-    with torch.no_grad():
-        W_ref, th_ref = ref.centralized(uf.clone(), e.clone(), ui_a.copy(), ed.clone())
-        W_var, th_var = var.centralized(uf.clone(), e.clone(), ui_a.copy(), ed.clone())
-
-    ufd, ed_, uid, edd = dataloader.gen_testing_data(K, threshold, threshold,
-                                                     duplicate=False, regenerate_channels=False)
-    ufd = [t.to(device) for t in ufd]
-    ed_ = [t.to(device) for t in ed_]
-    edd = [t.to(device) for t in edd]
-    with torch.no_grad():
-        W_dref, th_dref = ref.decentralized(ufd, ed_, uid, edd)
-        W_dvar, th_dvar = var.decentralized(ufd, ed_, uid, edd)
-
-    return {
-        "state_dict_loaded": str(missing),
-        "cen_max_abs_diff_W": float((W_var - W_ref).abs().max()),
-        "cen_max_abs_diff_theta": float((th_var - th_ref).abs().max()),
-        "dec_max_abs_diff_W": float((W_dvar - W_dref).abs().max()),
-        "dec_max_abs_diff_theta": float((th_dvar - th_dref).abs().max()),
-    }

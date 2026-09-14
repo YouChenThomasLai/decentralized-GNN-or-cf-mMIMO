@@ -17,10 +17,10 @@ import random
 import numpy as np
 import torch
 
-from data import MyDataLoader
+from simulation import ChannelSimulator
 from model import BaselineNet, load_checkpoint
-from utils_return_indivial_rates import discrete_mapping
-from discrete_cd_baseline import RatePrecompute, coordinate_descent, phase_levels
+from rates import RatePrecompute, phase_levels, quantize_phase
+from discrete_cd_baseline import coordinate_descent
 
 
 def set_seed(seed):
@@ -89,11 +89,12 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     set_seed(args.seed)
 
-    dataloader = MyDataLoader(args.M, args.N, args.L, args.batch_size)
-    dataloader.BS_RIS_association()
+    dataloader = ChannelSimulator(
+        args.M, args.N, args.L, args.batch_size, n_ap=args.num_ap
+    )
     pmax_w = 10 ** ((args.pmax_dbm - 30) / 10)
     model = BaselineNet(args.M, args.N, args.L, args.D, pmax_w, args.ch,
-                        args.num_ap, device).to(device)
+                        args.num_ap, device, users_per_ap=args.K).to(device)
     load_checkpoint(model, args.ckpt, device)
     model.eval()
 
@@ -108,19 +109,20 @@ def main():
 
     batches = max(1, args.samples // args.batch_size)
     for it in range(batches):
-        uf, e, ui, ed, _ = dataloader.gen_training_data(
-            args.K, args.assoc_threshold, args.assoc_threshold, duplicate=False)
+        uf, e, ui, ed, _ = dataloader.training_batch(
+            args.K, args.assoc_threshold, args.assoc_threshold
+        )
         uf, e, ed = uf.to(device), e.to(device), ed.to(device)
         pre = RatePrecompute(dataloader, device)
 
         with torch.no_grad():
-            W_c, th_c = model(uf, e, ui, ed, training=True, duplicate=False)
+            W_c, th_c = model(uf, e, ui, ed, training=True)
 
         outs = {"cen": (W_c, th_c)}
         for mode, flag in (("dec_paper", True), ("dec_own_only", False)):
-            uf_d, e_d, ui_d, ed_d = dataloader.gen_testing_data(
+            uf_d, e_d, ui_d, ed_d = dataloader.decentralized_batch(
                 args.K, args.assoc_threshold, args.assoc_threshold,
-                duplicate=False, regenerate_channels=False)
+                regenerate_channels=False)
             for i in range(len(uf_d)):
                 uf_d[i], e_d[i], ed_d[i] = uf_d[i].to(device), e_d[i].to(device), ed_d[i].to(device)
             with torch.no_grad():
@@ -129,9 +131,9 @@ def main():
             visible_counts[mode].append(vis)
 
             if mode == "dec_paper" and verified is None:
-                uf_r, e_r, ui_r, ed_r = dataloader.gen_testing_data(
+                uf_r, e_r, ui_r, ed_r = dataloader.decentralized_batch(
                     args.K, args.assoc_threshold, args.assoc_threshold,
-                    duplicate=False, regenerate_channels=False)
+                    regenerate_channels=False)
                 for i in range(len(uf_r)):
                     uf_r[i], e_r[i], ed_r[i] = uf_r[i].to(device), e_r[i].to(device), ed_r[i].to(device)
                 with torch.no_grad():
@@ -147,7 +149,7 @@ def main():
         for name, (Wx, thx) in outs.items():
             with torch.no_grad():
                 rec[f"{name}_cont"].append(pre.sum_rate(Wx, thx).cpu().numpy())
-                th_r = discrete_mapping(thx, args.num_bits)
+                th_r = quantize_phase(thx, args.num_bits)
                 rec[f"{name}_round"].append(pre.sum_rate(Wx, th_r).cpu().numpy())
                 if args.greedy:
                     _, r_g, _ = coordinate_descent(pre, Wx, th_r, levels, args.rounds)

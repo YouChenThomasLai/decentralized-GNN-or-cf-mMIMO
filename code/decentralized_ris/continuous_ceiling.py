@@ -24,10 +24,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from data import MyDataLoader
+from simulation import ChannelSimulator
 from model import BaselineNet, load_checkpoint
-from utils_return_indivial_rates import discrete_mapping
-from discrete_cd_baseline import RatePrecompute
+from rates import RatePrecompute, quantize_phase
 
 
 def set_seed(seed):
@@ -101,7 +100,7 @@ def optimize(pre, W_gnn, theta_gnn, mask, pmax, num_ap, mode, steps, lr_phi, lr_
         W = W_gnn if mode == "phase_only" else apply_power_constraint(
             W_raw, mask, alpha_logit, pmax, num_ap)
         rate = pre.sum_rate(W, theta)
-        rate_q = pre.sum_rate(W, discrete_mapping(theta, 2))
+        rate_q = pre.sum_rate(W, quantize_phase(theta, 2))
     return rate, rate_q, W, theta, history
 
 
@@ -142,11 +141,12 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     set_seed(args.seed)
 
-    dataloader = MyDataLoader(args.M, args.N, args.L, args.batch_size)
-    dataloader.BS_RIS_association()
+    dataloader = ChannelSimulator(
+        args.M, args.N, args.L, args.batch_size, n_ap=args.num_ap
+    )
     pmax_w = 10 ** ((args.pmax_dbm - 30) / 10)
     model = BaselineNet(args.M, args.N, args.L, args.D, pmax_w, args.ch,
-                        args.num_ap, device).to(device)
+                        args.num_ap, device, users_per_ap=args.K).to(device)
     load_checkpoint(model, args.ckpt, device)
     model.eval()
 
@@ -157,17 +157,18 @@ def main():
 
     batches = max(1, args.samples // args.batch_size)
     for it in range(batches):
-        uf, e, ui, ed, _ = dataloader.gen_training_data(
-            args.K, args.assoc_threshold, args.assoc_threshold, duplicate=False)
+        uf, e, ui, ed, _ = dataloader.training_batch(
+            args.K, args.assoc_threshold, args.assoc_threshold
+        )
         mask = torch.as_tensor(np.array(ui, dtype=bool), dtype=torch.float32, device=device)
         uf, e, ed = uf.to(device), e.to(device), ed.to(device)
         pre = RatePrecompute(dataloader, device)
 
         with torch.no_grad():
-            W_gnn, theta_gnn = model(uf, e, ui, ed, training=True, duplicate=False)
+            W_gnn, theta_gnn = model(uf, e, ui, ed, training=True)
             rec["gnn"].append(pre.sum_rate(W_gnn, theta_gnn).cpu().numpy())
             rec["gnn_round"].append(
-                pre.sum_rate(W_gnn, discrete_mapping(theta_gnn, 2)).cpu().numpy())
+                pre.sum_rate(W_gnn, quantize_phase(theta_gnn, 2)).cpu().numpy())
 
         for mode in ("phase_only", "joint"):
             r, rq, W, th, h = optimize(pre, W_gnn, theta_gnn, mask, pmax_w, args.num_ap,
