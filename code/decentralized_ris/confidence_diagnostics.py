@@ -37,29 +37,28 @@ def spearman(a, b):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--runs", nargs="+", required=True)
-    p.add_argument("--checkpoint", default="best_val_dec.pt")
+    p.add_argument("--checkpoint", default="best.pt")
     p.add_argument("--samples", type=int, default=320)
     p.add_argument("--eval_seed", type=int, default=20260914)
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--out", default="results_ris_action/confidence_diagnostics.json")
     args = p.parse_args()
 
-    import trainer_2
     from simulation import ChannelSimulator
+    from evaluate import checkpoint_path, seed_everything
     from model import load_checkpoint
     from variants import VariantNet, circular_consensus
-    from eval_variant import deterministic_state
 
     report = {}
     for run in sorted({d for pat in args.runs for d in glob.glob(pat) if os.path.isdir(d)}):
         summary = json.load(open(os.path.join(run, "summary.json")))
         cfg = summary["config"]
-        ckpt = os.path.join(run, "models", args.checkpoint)
-        if not os.path.exists(ckpt):
+        ckpt = checkpoint_path(run, args.checkpoint)
+        if ckpt is None:
             print(f"[skip] {run}")
             continue
 
-        deterministic_state(cfg["seed"])
+        seed_everything(cfg["seed"])
         dl = ChannelSimulator(
             cfg["M"], cfg["N"], cfg["L"], cfg["batch_size"], n_ap=cfg["AP"]
         )
@@ -73,7 +72,7 @@ def main():
         load_checkpoint(model, ckpt, device)
         model.eval()
 
-        deterministic_state(args.eval_seed)
+        seed_everything(args.eval_seed)
         n_ap = cfg["AP"]
         acc = {"rate": [], "rate_equal": [], "entropy": [], "eff_ap": [],
                "rho": [], "max_weight": []}

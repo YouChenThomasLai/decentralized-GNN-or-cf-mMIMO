@@ -6,7 +6,7 @@ fixed and instead searches the same grid with element-wise coordinate descent,
 which measures how much of the rounding loss is recoverable without retraining.
 
 Nothing here modifies the training pipeline: the checkpoint is loaded read-only
-and evaluation reuses `ChannelSimulator` exactly as `trainer_2.eval()` does.
+and evaluation reuses the same `ChannelSimulator` as training.
 """
 
 import argparse
