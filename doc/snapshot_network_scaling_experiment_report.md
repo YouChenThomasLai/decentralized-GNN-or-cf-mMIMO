@@ -19,7 +19,7 @@
 
 ### v1 ring topology
 
-- 原RIS Stage 0在scale增加時仍位於meaningful-rate regime，可作positive control。
+- 原 RIS baseline 在 scale 增加時仍位於 meaningful-rate regime，可作 positive control。
 - No-RIS Stage 1A沿用舊noise後位於noise floor，不能用於network-scaling interpretation。
 - Centralized/decentralized gap隨scale的單一seed趨勢不足以支持generalization。
 

@@ -149,7 +149,7 @@ def main():
         args.test_sample_val = 80
         args.save_every = 0
 
-    args.consensus = args.consensus or ("wreduce" if args.arch == "r0" else "equal")
+    args.consensus = args.consensus or variants.default_consensus(args.arch)
     seed_everything(args.seed)
     device = resolve_device(args.device)
     simulator = ChannelSimulator(

@@ -161,6 +161,7 @@ def main():
         return float(v.mean()), float(g.std(ddof=1) / np.sqrt(len(g))), g
 
     summary = {"checkpoint": args.ckpt, "samples": int(len(stacked["cen_cont"])),
+               "batch_size": B,
                "verification": verified, "phase_diagnostics": phase_diag,
                "means": {}, "gaps": {},
                "visible_nodes": {m: float(np.concatenate(v).mean()) for m, v in visible_counts.items()}}

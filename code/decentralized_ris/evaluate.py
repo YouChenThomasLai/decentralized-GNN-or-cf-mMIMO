@@ -10,6 +10,7 @@ import random
 import numpy as np
 import torch
 
+import variants
 from model import load_checkpoint
 from rates import quantize_phase, random_phase_like
 from simulation import ChannelSimulator
@@ -131,9 +132,7 @@ def evaluate_model(
 
 def build_model(config, simulator, device):
     pmax = 10 ** ((config["pmax_dbm"] - 30) / 10)
-    consensus = config.get("consensus") or (
-        "wreduce" if config["arch"] == "r0" else "equal"
-    )
+    consensus = config.get("consensus") or variants.default_consensus(config["arch"])
     return VariantNet(
         config["M"],
         config["N"],
@@ -168,6 +167,11 @@ def main():
     parser.add_argument("--eval_seed", type=int, default=20260914)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
+        "--arch_override",
+        choices=("r0c", "r1_shared", "r1_ap_ris_mag"),
+        help="evaluate an R0 checkpoint through a state-compatible action path",
+    )
+    parser.add_argument(
         "--out",
         default="../../artifacts/decentralized_ris/evaluation/final_screening.json",
     )
@@ -185,7 +189,16 @@ def main():
     for run_dir in run_dirs:
         with open(os.path.join(run_dir, "summary.json"), encoding="utf-8") as handle:
             summary = json.load(handle)
-        config = summary["config"]
+        config = summary["config"].copy()
+        source_arch = config["arch"]
+        if args.arch_override:
+            if source_arch not in ("r0", "r0c", "r1_shared", "r1_ap_ris_mag"):
+                raise SystemExit(
+                    "--arch_override requires a shared-reduction checkpoint "
+                    f"(r0/r0c/r1_shared/r1_ap_ris_mag), got {source_arch}"
+                )
+            config["arch"] = args.arch_override
+            config["consensus"] = variants.default_consensus(args.arch_override)
         checkpoint = checkpoint_path(run_dir, args.checkpoint)
         if checkpoint is None:
             print(f"[skip] {run_dir}: no {args.checkpoint}")
@@ -213,13 +226,17 @@ def main():
             )
 
         tag = summary["tag"]
+        if args.arch_override:
+            tag = f"{tag}__as_{args.arch_override}"
         results[tag] = {
             "run_dir": run_dir,
             "checkpoint": args.checkpoint,
             "samples": args.samples,
             "eval_seed": args.eval_seed,
             "unit_modulus_error": unit_error,
-            "model": summary["model"],
+            "source_arch": source_arch,
+            "evaluated_as_arch": config["arch"],
+            "model": model.describe(),
             "best_val_iteration": summary["best_val"].get("iteration"),
             "per_user_rate": per_user.tolist(),
             **{key: float(values.mean()) for key, values in batches.items()},

@@ -9,7 +9,12 @@ representation, the AP output interface and the aggregation:
     arch      RIS path                       AP output        aggregation
     ------------------------------------------------------------------------
     r0        RIS message-passing node       4N latent        CPU W_reduce
-    r1        RIS message-passing node       2N proposal      parameter-free
+    r0c       RIS message-passing node       2N raw logits    sum, then project
+    r1_shared RIS message-passing node       2N unit proposal circular mean
+    r1_ap_ris_mag as r1_shared, plus one     2N+1 (proposal   magnitude-weighted
+              importance weight per AP-RIS   + weight)        circular mean
+    r1        RIS message-passing node       2N unit proposal circular mean
+              with AP-local heads (capacity control)
     r3a       node-free per-RIS link tokens  2N proposal      parameter-free
     r3b       r3a + parameter-free per-RIS   2N proposal      parameter-free
               context in the AP-UE update
@@ -29,9 +34,14 @@ import torch.nn.functional as F
 import model
 from model import _initial_layer, _max_excluding_self, _node_update_layer
 
-ARCHS = ("r0", "r1", "r3a", "r3b")
+ARCHS = ("r0", "r0c", "r1_shared", "r1_ap_ris_mag", "r1", "r3a", "r3b")
 IDENTITIES = ("none", "scalar", "onehot", "learned", "physical")
-CONSENSUS = ("wreduce", "equal", "confidence")
+CONSENSUS = ("wreduce", "equal", "confidence", "ap_ris_mag")
+
+_RAW_LOGIT_ARCHS = ("r0", "r0c")
+_SHARED_REDUCTION_ARCHS = ("r0", "r0c", "r1_shared", "r1_ap_ris_mag")
+_LOCAL_PROJECTION_ARCHS = ("r1_shared", "r1_ap_ris_mag")
+_RIS_NODE_ARCHS = _SHARED_REDUCTION_ARCHS + ("r1",)
 
 _LEARNED_ID_DIM = 8
 _PHYSICAL_ID_DIM = 4
@@ -40,6 +50,12 @@ _PHYSICAL_ID_DIM = 4
 def identity_dim(kind, n_ris):
     return {"none": 0, "scalar": 1, "onehot": n_ris,
             "learned": _LEARNED_ID_DIM, "physical": _PHYSICAL_ID_DIM}[kind]
+
+
+def default_consensus(arch):
+    if arch in _RAW_LOGIT_ARCHS:
+        return "wreduce"
+    return "ap_ris_mag" if arch == "r1_ap_ris_mag" else "equal"
 
 
 def unit_modulus_error(theta):
@@ -61,18 +77,24 @@ def _unit_from_pairs(flat, n_ris, n_elem):
     return torch.where(norm > 1e-12, pair / norm.clamp(min=1e-12), fallback)
 
 
-def circular_consensus(proposals, active, logits=None, tau=1.0):
+def circular_consensus(proposals, active, logits=None, tau=1.0, weights=None):
     """Parameter-free consensus over AP proposals.
 
     proposals: (B, A, R, N, 2) unit-modulus per-AP proposals.
     active:    (B, A) 1.0 where the AP contributes a proposal.
     logits:    (B, A, R) AP confidences, or None for equal weighting.
+    weights:   (B, A, R) non-negative importance weights used directly, in
+               place of the softmax over `logits`.  The consensus direction is
+               invariant to their overall scale.
 
     Returns the consensus phase (B, R, N, 2) and the weights (B, A, R).
     """
     b, n_ap, n_ris = proposals.shape[0], proposals.shape[1], proposals.shape[2]
     act = active.unsqueeze(2).expand(b, n_ap, n_ris)                       # (B, A, R)
-    if logits is None:
+    if weights is not None:
+        w = weights * act
+        w = w / w.sum(dim=1, keepdim=True).clamp(min=1e-12)
+    elif logits is None:
         w = act / act.sum(dim=1, keepdim=True).clamp(min=1e-12)
     else:
         masked = logits / tau
@@ -224,20 +246,35 @@ class VariantNet(nn.Module):
         super().__init__()
         assert arch in ARCHS, arch
         if consensus is None:
-            consensus = "wreduce" if arch == "r0" else "equal"
+            consensus = default_consensus(arch)
         assert consensus in CONSENSUS, consensus
-        if arch == "r0" and consensus != "wreduce":
-            raise ValueError("arch r0 is the CPU-decoder baseline; it only supports consensus=wreduce")
-        if arch != "r0" and consensus == "wreduce":
-            raise ValueError("the proposal arches replace the CPU decoder; use equal or confidence")
-        if arch in ("r0", "r1") and identity != "none":
+        if arch in _RAW_LOGIT_ARCHS and consensus != "wreduce":
+            raise ValueError("r0/r0c use the shared reduction head; set consensus=wreduce")
+        if arch not in _RAW_LOGIT_ARCHS and consensus == "wreduce":
+            raise ValueError(
+                "the proposal arches replace the CPU decoder; use equal, "
+                "confidence, or ap_ris_mag"
+            )
+        if arch == "r1_shared" and consensus != "equal":
+            raise ValueError("r1_shared is the clean projection-order control; use consensus=equal")
+        if arch == "r1_ap_ris_mag" and consensus != "ap_ris_mag":
+            raise ValueError(
+                "r1_ap_ris_mag is defined by its magnitude weighting; "
+                "use consensus=ap_ris_mag"
+            )
+        if consensus == "ap_ris_mag" and arch != "r1_ap_ris_mag":
+            raise ValueError(
+                "consensus=ap_ris_mag needs the shared pre-projection logits "
+                "of r1_ap_ris_mag"
+            )
+        if arch in _RIS_NODE_ARCHS and identity != "none":
             raise ValueError("explicit RIS identity is screened on the node-free arches only")
 
         self.device = device
         self.M, self.N, self.L, self.D, self.ch, self.AP = M, N, L, D, ch, AP
         self.Pmax = Pmax
         self.arch, self.consensus, self.tau = arch, consensus, tau
-        self.ris_node = arch in ("r0", "r1")
+        self.ris_node = arch in _RIS_NODE_ARCHS
         self.ris_ctx = arch == "r3b"
         self.in_dim = 2 * M * (N + 1)
         node_dim = ch * (D + 1)
@@ -263,7 +300,7 @@ class VariantNet(nn.Module):
         if self.ris_node:
             self.RIS_readout_AP_list = nn.ModuleList(
                 [model.RisReadoutAp(M, N, L, Pmax, node_dim, L * users_per_ap) for _ in range(AP)])
-            if arch == "r0":
+            if arch in _SHARED_REDUCTION_ARCHS:
                 self.RIS_merge = model.RisMerge(N)
             elif consensus == "confidence":
                 self.conf_head_list = nn.ModuleList([ApConfidenceHead(N) for _ in range(AP)])
@@ -282,8 +319,9 @@ class VariantNet(nn.Module):
         dead = []
         for name, module in self.named_modules():
             leaf = name.rsplit(".", 1)[-1]
-            if self.arch == "r0" and leaf == "f_merge" and name.startswith("RIS_readout_AP_list"):
-                dead.append(name)                      # r0 decodes on the CPU instead
+            if (self.arch in _SHARED_REDUCTION_ARCHS
+                    and leaf == "f_merge" and name.startswith("RIS_readout_AP_list")):
+                dead.append(name)                      # these arches use one shared reduction head
             if not self.ris_node and name == "phase_head.conf" and self.consensus != "confidence":
                 dead.append(name)
         return sum(p.numel() for n in dead for p in dict(self.named_modules())[n].parameters())
@@ -296,7 +334,8 @@ class VariantNet(nn.Module):
                 "identity": getattr(self, "identity", None).kind if not self.ris_node else "none",
                 "total_parameters": total, "cpu_trainable_parameters": self.cpu_trainable_parameters(),
                 "ap_to_cpu_reals_per_ap_ris": (4 * self.N if self.arch == "r0"
-                                               else 2 * self.N + (1 if self.consensus == "confidence" else 0))}
+                                               else 2 * self.N
+                                               + (1 if self.consensus in ("confidence", "ap_ris_mag") else 0))}
 
     # ------------------------------------------------------------- shared body
     def _backbone(self, uf, e_m, e_dir_m, mask):
@@ -324,11 +363,11 @@ class VariantNet(nn.Module):
         return uk, None, z0
 
     def _ap_proposal(self, uk, rl, link, e_m, ap_index, k_user, ap_mask):
-        """One AP's RIS output: the r0 latent, or a unit-modulus proposal + confidence."""
+        """One AP's RIS output: a shared-head latent, or a local-head proposal."""
         if self.ris_node:
             e_ap = e_m[:, :, ap_index * k_user:(ap_index + 1) * k_user].reshape(e_m.shape[0], -1)
             latent = self.RIS_readout_AP_list[ap_index](rl, e_ap)           # (B, R, 4N)
-            if self.arch == "r0":
+            if self.arch in _SHARED_REDUCTION_ARCHS:
                 return latent, None, None
             flat = self.RIS_readout_AP_list[ap_index].f_merge(latent)       # (B, R, 2N)
             conf = (self.conf_head_list[ap_index](latent)
@@ -340,15 +379,50 @@ class VariantNet(nn.Module):
     def _merge(self, latents, proposals, confs, active, trace=None):
         if self.arch == "r0":
             return self.RIS_merge(latents)
-        props = torch.stack(proposals, dim=1)                               # (B, A, R, N, 2)
+        if self.arch == "r0c":
+            return self.RIS_merge.forward_commuted(latents)
+        z_pairs, pair_weights = None, None
+        if self.arch in _LOCAL_PROJECTION_ARCHS:
+            # The same z_l = W_reduce q_l + b/A used by r0c, with the only
+            # intervention being unit projection before rather than after sum.
+            # These AP-side operations are batched here only for simulator
+            # convenience; the modeled communication boundary is their output.
+            flat = torch.stack(self.RIS_merge.local_logits(latents), dim=1)
+            proposals = _unit_from_pairs(flat, self.L, self.N)
+            # Keep all A terms in this controlled ablation.  An inactive AP has
+            # a zeroed q_l and contributes only the evenly split learned bias.
+            consensus_active = torch.ones_like(active)
+            if trace is not None or self.arch == "r1_ap_ris_mag":
+                # The pre-projection logit whose magnitude local projection
+                # discards; the diagnostics test whether it carries reliability.
+                z_pairs = torch.stack((flat[..., :self.N], flat[..., self.N:]), dim=-1)
+            if self.arch == "r1_ap_ris_mag":
+                # s_{l,r} = mean_n ||z_{l,r,n}||: one scalar per AP-RIS that the
+                # AP computes from its own logits, so no parameter is added and
+                # the transmitted phase stays unit modulus.  Call it an
+                # importance weight, not a confidence: it tracks leave-one-AP-out
+                # marginal contribution, not agreement with the other APs.
+                pair_weights = z_pairs.norm(dim=-1).mean(dim=3)             # (B, A, R)
+            if trace is None:
+                z_pairs = None
+        else:
+            proposals = torch.stack(proposals, dim=1)                       # (B, A, R, N, 2)
+            consensus_active = active
         logits = torch.stack(confs, dim=1) if self.consensus == "confidence" else None
-        theta, w = circular_consensus(props, active, logits, self.tau)
+        theta, w = circular_consensus(
+            proposals, consensus_active, logits, self.tau, pair_weights
+        )
         if trace is not None:
-            trace.update(proposals=props, weights=w, active=active, logits=logits)
+            trace.update(proposals=proposals, weights=w, active=consensus_active,
+                         logits=logits, z_pairs=z_pairs, latents=latents)
+            if self.arch in _LOCAL_PROJECTION_ARCHS:
+                trace["source_active"] = active
             if self.consensus == "confidence":
                 # Same proposals, equal weights: isolates the consensus rule from
                 # the representation that produced the proposals.
-                trace["theta_equal"], _ = circular_consensus(props, active, None, self.tau)
+                trace["theta_equal"], _ = circular_consensus(
+                    proposals, consensus_active, None, self.tau
+                )
         return theta
 
     # --------------------------------------------------------------- forwards
@@ -357,7 +431,7 @@ class VariantNet(nn.Module):
             return self.centralized(user_feature, e, user_index, e_dir)
         return self.decentralized(user_feature, e, user_index, e_dir)
 
-    def centralized(self, user_feature, e, user_index, e_dir):
+    def centralized(self, user_feature, e, user_index, e_dir, trace=None):
         device = self.device
         mask = torch.as_tensor(user_index, dtype=torch.bool, device=device)
         m_f = mask.to(user_feature.dtype)
@@ -391,7 +465,7 @@ class VariantNet(nn.Module):
 
         # Every AP is present in the centralized view, matching the baseline.
         active = torch.ones((b, n_ap), device=device, dtype=W.dtype)
-        theta = self._merge(latents, proposals, confs, active)
+        theta = self._merge(latents, proposals, confs, active, trace)
         return W, theta
 
     def decentralized(self, user_feature, e, user_index, e_dir, trace=None):

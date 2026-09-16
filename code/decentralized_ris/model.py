@@ -171,6 +171,25 @@ class RisMerge(nn.Module):
         self.N = N
         self.f_merge = nn.Linear(self.N*4,self.N*2)
 
+    def _phase(self, logits):
+        phase_re = logits[:, :, :self.N].unsqueeze(3)
+        phase_im = logits[:, :, self.N:].unsqueeze(3)
+        return F.normalize(torch.cat((phase_re, phase_im), dim=3), dim=3)
+
+    def local_logits(self, Rl_list):
+        """Apply the shared reduction head before aggregation.
+
+        Splitting the bias evenly is required for
+        ``sum_l (W q_l + b/A) == W sum_l q_l + b``.
+        """
+        bias = self.f_merge.bias / len(Rl_list)
+        return [F.linear(Rl, self.f_merge.weight, bias) for Rl in Rl_list]
+
+    def forward_commuted(self, Rl_list):
+        """Algebraically equivalent AP-side form of :meth:`forward`."""
+        logits = torch.stack(self.local_logits(Rl_list), dim=0).sum(dim=0)
+        return self._phase(logits)
+
     def forward(self,Rl_list):
         """
         Rl_list: list of (B, L, 4N) tensors (from APs)
@@ -178,14 +197,8 @@ class RisMerge(nn.Module):
         """
         # Merge across APs
         Rl = torch.stack(Rl_list, dim=0).sum(dim=0)                # (B, L, 4N)
-        Rl = self.f_merge(Rl)                                      # (B, L, 2N)
-
-        phase_re = Rl[:,:,:self.N].unsqueeze(3)
-        phase_im = Rl[:,:,self.N:].unsqueeze(3)
-        phase = torch.cat((phase_re,phase_im),dim=3)
-        phase = F.normalize(phase,dim=3)
-
-        return phase
+        logits = self.f_merge(Rl)                                  # (B, L, 2N)
+        return self._phase(logits)
 
 
 class PowerControl(nn.Module):
