@@ -1,14 +1,14 @@
 """MRC-style alternative explanation for the r1_ap_ris_mag pair scale.
 
-Section 6.4 of `doc/ris_contribution_analysis.md` raises the objection that the
+The E05 report in `doc/experiments/e05_energy_consensus.md` tests whether the
 learned pair scale
 
     s_{l,r} = (1/N) sum_n || z_{l,r,n} ||,   z_l = W_reduce q_l + b/A
 
 may be nothing more than a learned stand-in for the AP-RIS large-scale gain,
 because the RIS readout's second branch is fed the raw channel energies
-e(l,r,k) = tr(H_{l,r,k} H_{l,r,k}^H).  Section 8.2 asks for the defensive
-experiment: correlate s_{l,r} with that energy, then substitute a closed-form
+e(l,r,k) = tr(H_{l,r,k} H_{l,r,k}^H).  The diagnostic correlates s_{l,r} with
+that energy, then substitutes a closed-form
 parameter-free function of it for the learned scale and re-evaluate.
 
 This script is pure evaluation of a frozen checkpoint.  It never trains, and it
@@ -547,7 +547,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--run",
-        default="../../artifacts/decentralized_ris/results_extend_500k/"
+        default="../../artifacts/decentralized_ris/e01_baseline_training/iter500000/"
                 "M2_N30_L4_K8_P15.0_iter350000_seed0/run0",
     )
     parser.add_argument("--checkpoint", default="resumable_final.pt")
@@ -563,7 +563,7 @@ def main():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
         "--out_dir",
-        default="../../artifacts/decentralized_ris/mrc_proxy_diagnostic",
+        default="../../artifacts/decentralized_ris/e05_energy_consensus/discovery",
     )
     args = parser.parse_args()
 

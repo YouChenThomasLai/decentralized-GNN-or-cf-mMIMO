@@ -105,7 +105,7 @@ def scatter(axis, arms, names, value, error, size=6.0):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--root", default="artifacts/decentralized_ris/message_codec_pilot")
+        "--root", default="artifacts/decentralized_ris/e07_message_codec")
     args = parser.parse_args()
 
     root = Path(args.root)

@@ -74,7 +74,8 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda:0")
     p.add_argument(
-        "--out_dir", default="../../artifacts/decentralized_ris/local_csi_ablation"
+        "--out_dir",
+        default="../../artifacts/decentralized_ris/e03_phase_headroom/input_mode_decomposition",
     )
     args = p.parse_args()
 

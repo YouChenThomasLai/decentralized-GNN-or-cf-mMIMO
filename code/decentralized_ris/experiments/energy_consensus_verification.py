@@ -646,7 +646,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--run",
-        default="../../artifacts/decentralized_ris/results_extend_500k/"
+        default="../../artifacts/decentralized_ris/e01_baseline_training/iter500000/"
                 "M2_N30_L4_K8_P15.0_iter350000_seed0/run0")
     parser.add_argument("--checkpoint", default="resumable_final.pt")
     parser.add_argument("--op", default="main", choices=sorted(OPERATING_POINTS))
@@ -662,7 +662,7 @@ def main():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
         "--out_dir",
-        default="../../artifacts/decentralized_ris/energy_consensus_verification")
+        default="../../artifacts/decentralized_ris/e05_energy_consensus/verification")
     args = parser.parse_args()
 
     started = time.time()

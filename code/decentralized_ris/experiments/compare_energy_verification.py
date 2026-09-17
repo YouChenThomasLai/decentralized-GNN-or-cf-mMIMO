@@ -28,23 +28,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--stored",
-        default="../../artifacts/decentralized_ris/mrc_proxy_diagnostic/"
+        default="../../artifacts/decentralized_ris/e05_energy_consensus/discovery/"
                 "locked_seed20260922_paired.npz")
     parser.add_argument(
         "--stored_json",
-        default="../../artifacts/decentralized_ris/mrc_proxy_diagnostic/"
+        default="../../artifacts/decentralized_ris/e05_energy_consensus/discovery/"
                 "locked_seed20260922.json")
     parser.add_argument(
         "--verification",
-        default="../../artifacts/decentralized_ris/energy_consensus_verification/"
+        default="../../artifacts/decentralized_ris/e05_energy_consensus/verification/"
                 "main_seed20260922_per_sample.npz")
     parser.add_argument(
         "--verification_json",
-        default="../../artifacts/decentralized_ris/energy_consensus_verification/"
+        default="../../artifacts/decentralized_ris/e05_energy_consensus/verification/"
                 "main_seed20260922.json")
     parser.add_argument(
         "--out",
-        default="../../artifacts/decentralized_ris/energy_consensus_verification/"
+        default="../../artifacts/decentralized_ris/e05_energy_consensus/verification/"
                 "reproduction_check.json")
     args = parser.parse_args()
 

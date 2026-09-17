@@ -198,7 +198,7 @@ def main():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
         "--out",
-        default="../../artifacts/decentralized_ris/evaluation/proposal_diagnostics.json",
+        default="../../artifacts/decentralized_ris/e04_action_interfaces/evaluation/proposal_diagnostics.json",
     )
     args = parser.parse_args()
 

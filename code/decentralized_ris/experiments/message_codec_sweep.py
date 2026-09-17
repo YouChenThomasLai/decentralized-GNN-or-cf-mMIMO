@@ -506,7 +506,7 @@ def main():
     parser.add_argument("--clip_quantile", type=float, default=0.001)
     parser.add_argument("--codebook_seed", type=int, default=20260919)
     parser.add_argument("--out_dir",
-                        default="../../artifacts/decentralized_ris/message_codec_pilot")
+                        default="../../artifacts/decentralized_ris/e07_message_codec")
     args = parser.parse_args()
 
     def parse_bits(text, allow_zero=False):

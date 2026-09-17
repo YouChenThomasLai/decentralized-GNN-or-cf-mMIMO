@@ -122,11 +122,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--trajectory",
-        default="../artifacts/decentralized_ris/mode_trajectory/trajectory.json",
+        default="../artifacts/decentralized_ris/e02_input_modes/trajectory.json",
     )
     parser.add_argument(
         "--output-base",
-        default="../artifacts/decentralized_ris/mode_trajectory/mode_trajectory",
+        default="../artifacts/decentralized_ris/e02_input_modes/mode_trajectory",
     )
     parser.add_argument("--schemes", nargs="+", default=["cont", "round"],
                         choices=["cont", "round"])

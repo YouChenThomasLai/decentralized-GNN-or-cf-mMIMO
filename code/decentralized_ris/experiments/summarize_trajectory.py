@@ -1,6 +1,6 @@
 """Collect the per-checkpoint visibility-mode evaluations into one trajectory.
 
-`scripts/mode_trajectory.sh` writes one `experiments.local_csi` output directory
+`scripts/e02_mode_trajectory.sh` writes one `experiments.local_csi` output directory
 per checkpoint, named `iter<iteration>`. This script reads those directories,
 recovers the training iteration from the name, and reports every mode mean and
 every paired mode gap as a function of training steps. Statistics use the batch
@@ -153,7 +153,7 @@ def render_windows(rows, scheme):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", default="../../artifacts/decentralized_ris/mode_trajectory")
+    parser.add_argument("--root", default="../../artifacts/decentralized_ris/e02_input_modes")
     parser.add_argument("--out", default=None, help="text table path")
     parser.add_argument("--json", default=None, help="machine-readable trajectory path")
     args = parser.parse_args()

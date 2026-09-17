@@ -42,7 +42,8 @@ def main():
     p.add_argument("--eval_seed", type=int, default=20260914)
     p.add_argument("--device", default="cuda:0")
     p.add_argument(
-        "--out", default="../../artifacts/decentralized_ris/confidence_diagnostics.json"
+        "--out",
+        default="../../artifacts/decentralized_ris/e04_action_interfaces/evaluation/confidence_diagnostics.json",
     )
     args = p.parse_args()
 

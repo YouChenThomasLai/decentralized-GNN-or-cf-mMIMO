@@ -95,7 +95,7 @@ def test_ap_ris_mag_changes_only_the_consensus_weight():
     described = ap_ris_mag.describe()
     assert described["effective_parameters"] == r0.describe()["effective_parameters"]
     assert described["cpu_trainable_parameters"] == 0
-    assert described["ap_to_cpu_reals_per_ap_ris"] == 2 * kwargs["N"] + 1
+    assert described["ap_to_cpu_reals_per_ap_ris"] == kwargs["N"] + 1
 
     # Uniform weights must reproduce the unweighted rule exactly, so r1_ap_ris_mag
     # differs from r1_shared only through the magnitudes it feeds in.

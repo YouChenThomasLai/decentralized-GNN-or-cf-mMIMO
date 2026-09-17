@@ -3,15 +3,27 @@
 ## Material Passport
 
 - Origin Date: 2026-09-15
-- Last Updated: 2026-09-15（補入論文式 (9)、(10)、(26)–(28) 與程式對照）
-- Verification Status: IMPLEMENTED（定義已與 `model.py`、`variants.py` 及 action-interface tests 對照）
-- Version Label: `decentralized_ris_methods_v2`
-- Scope: R0、R0c、R1-Shared、R1 AP–RIS magnitude weighting，以及 2-bit／full-CSI greedy evaluation
+- Last Updated: 2026-09-16（統一 G0／G1／G2 canonical CLI 名稱與 AP→CPU payload 記法）
+- Verification Status: IMPLEMENTED（定義已與 `model.py`、`variants.py` 及 action／graph-energy tests 對照）
+- Version Label: `decentralized_ris_methods_v4`
+- Scope: R0、R0c、R1 interfaces、local-energy consensus、G0／G1／G2，以及 2-bit／full-CSI greedy evaluation
+- Entry: [Decentralized RIS 研究文件入口](./README.md)
 - Reference paper: [Decentralized Graph Neural Network-Based Joint Beamforming in Multi-RIS-Aided Cell-Free Networks](<./Decentralized Graph Neural Network-Based Joint Beamforming in Multi-RIS-Aided Cell-Free Networks.pdf>)
 
 本文件是上述方法定義的單一來源。實驗結果、統計判讀與研究決策分別留在
-[現況與證據報告](./decentralized_ris_evidence.md)和
-[action screening 報告](./ris_action_screening_report.md)，不在此重複。
+[實驗總報告](./decentralized_ris_experiments.md)與其連結的詳細報告，不在此重複。
+
+快速對照：
+
+| 名稱 | RIS representation | AP→CPU message | CPU aggregation |
+|---|---|---|---|
+| R0 | RIS message-passing node | $4N$ learned features | learned reduction，再 projection |
+| R0c | 同 R0 | $2N$ raw logits | sum，再 projection；與 R0 代數等價 |
+| R1-Shared | 同 R0 | $N$ phase angles | equal circular consensus |
+| R1 AP–RIS magnitude | 同 R0 | $N$ phase angles + 1 learned scale | learned-scale circular consensus |
+| G0 | 同 R0 | $N$ phase angles + 1 local-energy scalar | energy-weighted circular consensus |
+| G1 | node-free per-RIS link tokens | $N$ phase angles + 1 local-energy scalar | 同 G0 |
+| G2 | G1 + per-RIS context | $N$ phase angles + 1 local-energy scalar | 同 G0 |
 
 <a id="notation"></a>
 
@@ -110,8 +122,9 @@ $$
 \in\mathbb R^{2N}.
 $$
 
-因此 $N$ 個 phase 在目前張量介面中占 $2N$ 個 real values，而不是 $N$ 個。這不是理論上的
-最小編碼量；實際系統可改傳 $N$ 個角度，2-bit phase 也可改傳 $N$ 個 2-bit indices。
+模型內部仍以 $2N$ 個 Cartesian real values 表示 $N$ 個 phase。AP→CPU 的 wire format
+則只傳 $N$ 個角度；CPU 以 $(\cos\phi,\sin\phi)$ 重建 unit proposals。2-bit phase 若進一步
+放到 consensus 前，則可改傳 $N$ 個 2-bit indices，但那是另一個會改變演算法的介面。
 
 對任意非零 $\mathbf x\in\mathbb R^2$，定義逐 element projection
 
@@ -215,6 +228,8 @@ $$
 等價。論文把 readout 記為 $f_{\mathrm{RIS},l}^{\mathrm{out}}$，而矩陣省略 AP index；現行程式則以
 ModuleList 為每個 AP 建立一個 RisReadoutAp。
 
+<a id="action-interfaces"></a>
+
 ## 3. 四種 action interface
 
 四種介面採用相同的 GNN state 定義、論文式 (26) readout architecture 與 learned
@@ -225,8 +240,10 @@ AP 傳送的表示和 projection 相對於 aggregation 的位置：
 |---|---|---:|---|
 | R0 | $\mathbf s_{l,r}^{(D)},\mathbf e_l\to\mathbf v_{l,r}$ | $4N$ phase feature | 論文式 (27) 的 learned reduction 與 normalization |
 | R0c | $\mathbf v_{l,r}\to\mathbf z_{l,r}$ | $2N$ raw logits | 先加總 $\mathbf z$，再 normalization |
-| R1-Shared | $\mathbf v_{l,r}\to\mathbf z_{l,r}\to\mathbf p_{l,r}$ | $2N$ unit proposals | 等權 circular consensus |
-| R1 AP–RIS magnitude weighting | $\mathbf v_{l,r}\to\mathbf z_{l,r}\to(\mathbf p_{l,r},s_{l,r})$ | $2N+1$ | importance-weighted circular consensus |
+| R1-Shared | $\mathbf v_{l,r}\to\mathbf z_{l,r}\to\mathbf p_{l,r}$ | $N$ phase angles | CPU 重建 unit proposals，再做等權 circular consensus |
+| R1 AP–RIS magnitude weighting | $\mathbf v_{l,r}\to\mathbf z_{l,r}\to(\mathbf p_{l,r},s_{l,r})$ | $N+1$ | CPU 重建 unit proposals，再做 importance-weighted circular consensus |
+
+<a id="r0"></a>
 
 ### 3.1 R0：論文式 (26)–(28)
 
@@ -378,18 +395,18 @@ R0c 原本保留的 $N$ 個 magnitudes。
 
 ## 5. Payload 與 decentralization 用語
 
-以 Cartesian real values 計數：
+以傳輸的 fp32 scalar 數計數；proposal interfaces 使用 phase-angle codec：
 
 | 方法 | 每個 AP–RIS pair | 全部 AP→aggregator payload | 聚合端 trainable phase component |
 |---|---:|---:|---:|
 | R0 | $4N$ | $4RNL$ | 有 |
 | R0c | $2N$ | $2RNL$ | 無 |
-| R1-Shared | $2N$ | $2RNL$ | 無 |
-| R1 AP–RIS magnitude weighting | $2N+1$ | $RL(2N+1)$ | 無 |
+| R1-Shared | $N$ | $RNL$ | 無 |
+| R1 AP–RIS magnitude weighting | $N+1$ | $RL(N+1)$ | 無 |
 
-在目前 $N=30$ 的設定中，AP–RIS magnitude weighting 是每個 AP–RIS pair 傳 61 個 real values：60 個 Cartesian
-proposal coordinates 加一個 scalar。聚合端對 weights 的共同尺度不敏感，實作會先在 AP 維度
-正規化，再計算加權 resultant 與最終 unit projection。
+在目前 $N=30$ 的設定中，AP–RIS magnitude／energy weighting 是每個 AP–RIS pair 傳 31 個
+real values：30 個 phase angles 加一個 scalar。聚合端對 weights 的共同尺度不敏感，實作會先
+在 AP 維度正規化，再計算加權 resultant 與最終 unit projection。
 
 只要最終 consensus 仍由 CPU 或中央 controller 執行，本文稱
 `decentralized phase inference with centralized consensus`。只有 AP／RIS controllers 不依賴 CPU、
@@ -467,3 +484,133 @@ coordinate descent 造成的 local-optimum 差異，不能直接稱為純 precod
 | 介面與等價性測試 | [tests/test_action_interface.py](../code/decentralized_ris/tests/test_action_interface.py) |
 | $\Theta_{\rm disc}^{(Q)}$ quantization | [rates.py](../code/decentralized_ris/rates.py) |
 | Full-CSI greedy coordinate search | [experiments/discrete_cd.py](../code/decentralized_ris/experiments/discrete_cd.py) |
+| $E_{l,r}$ | [variants.py](../code/decentralized_ris/variants.py) 的 `local_energy` |
+| phase-angle wire codec | [variants.py](../code/decentralized_ris/variants.py) 的 `encode_phase`／`decode_phase` |
+| Energy-weighted circular consensus | [variants.py](../code/decentralized_ris/variants.py) 的 `circular_consensus` 與 `VariantNet._merge` |
+| G0 | `VariantNet(arch="g0")` |
+| G1 link representation | `LinkEncoder`、`ApNodeUpdateLayer`、`NodeFreePhaseHead`，`arch="g1"` |
+| G2 per-RIS context | `VariantNet._backbone` 中 `self.ris_ctx`，`arch="g2"` |
+| Screening／long-training evaluation | [experiments/graph_energy_screening.py](../code/decentralized_ris/experiments/graph_energy_screening.py) |
+
+<a id="energy-consensus"></a>
+
+## 10. Parameter-free local-energy consensus
+
+G0／G1／G2 共用同一個 consensus 規則。對 AP $l$ 與 RIS $r$，定義
+
+$$
+E_{l,r}
+=
+\sum_{k\in\mathcal K_l}
+\operatorname{tr}\!\left(
+\mathbf H_{(l,r,k)}^T\mathbf H_{(l,r,k)}^*
+\right).
+$$
+
+$\mathcal K_l$ 是 AP $l$ 自己服務的 UE，因此 $E_{l,r}$ 只使用 AP $l$ 的 channel
+與 association mask，不使用其他 AP 的 CSI、beamformer 或 ground-truth rate。實作上它由
+`edges[:, r, l的K個欄位]` 依 served-user mask 加總，並在進入 consensus 前 detach；
+它是 parameter-free weight，不是可訓練的 confidence head。
+
+若 AP $l$ 對 RIS $r$ 提出的 element-$n$ unit proposal 為
+$\mathbf p_{l,r,n}\in\mathbb R^2$，則最終 phase 為
+
+$$
+\boldsymbol\vartheta_{r,n}^{\rm energy}
+=
+\Pi\!\left(
+\sum_l \bar E_{l,r}\mathbf p_{l,r,n}
+\right),
+\qquad
+\bar E_{l,r}
+=
+\frac{E_{l,r}}{\sum_{l'}E_{l',r}}.
+$$
+
+共同尺度不改變 consensus 方向。若 resultant 幾乎為零，程式回退到 phase 0；
+現有正式評估中沒有觸發這個 fallback。AP→CPU 每個 AP–RIS pair 傳送
+$N$ 個 phase angles 與一個 $E_{l,r}$，合計 $N+1$ 個 fp32 scalars；$N=30$
+時為 31。
+
+Energy consensus 的「local」只指權重 $E_{l,r}$ 的資訊來源。目前 G0／G1／G2
+在 paper-decentralized inference 下產生 proposal 時，仍使用式 (10) 允許的 shared-UE
+cross-AP links；因此應描述為 `paper-decentralized proposal + strictly AP-local energy
+weight + centralized parameter-free consensus`。
+
+<a id="graph-variants"></a>
+
+## 11. G0／G1／G2 graph variants
+
+G0／G1／G2 同時是實驗報告與 CLI 的 canonical 方法名稱。`--consensus energy` 與
+`--identity none` 是預設值，因此一般訓練只需指定 `--arch`：
+
+| 名稱 | CLI | 有效參數量 | 與前一個版本的差異 |
+|---|---|---:|---|
+| G0 | `--arch g0` | 1,664,445 | 保留 R0 RIS node 與 shared reduction，以 local energy 取代 equal／learned-scale 權重 |
+| G1 | `--arch g1` | 819,269 | 移除 RIS message-passing node，改用 per-RIS link tokens 與 shared masked pooling |
+| G2 | `--arch g2` | 868,421 | 在 G1 的 AP–UE update 加入 parameter-free per-RIS context |
+
+### 11.1 G0：RIS-node energy control
+
+G0 的 backbone、RIS node state、AP-specific readout 與 $\mathbf W_{\rm reduce}$ 都與
+R1-Shared 相同。每個 AP 先計算
+
+$$
+\mathbf z_{l,r}=\mathbf W_{\rm reduce}\mathbf v_{l,r}+\mathbf b/L,
+\qquad
+\mathbf p_{l,r,n}=\Pi(\mathbf z_{l,r,n}),
+$$
+
+再以 §10 的 $E_{l,r}$ 取代 equal 或 learned-magnitude 權重。它是 energy
+consensus 的 representation control：若 G0 已成功，就不能把增益單獨歸因於移除
+RIS node。
+
+### 11.2 G1：node-free per-RIS link tokens
+
+G1 不建立 RIS message-passing node。它先為每個 `(RIS, AP–UE node)` 產生
+shared link token：
+
+$$
+\mathbf z^{(0)}_{r,k}
+=
+\phi\!\left(
+\widetilde{\mathbf h}_{r,k},
+\bar e^{(K)}_{r,k},
+\bar e^{(R)}_{k,r},
+\bar e^{(D)}_k
+\right).
+$$
+
+$\bar e^{(K)}$、$\bar e^{(R)}$與 $\bar e^{(D)}$ 分別是沿 AP–UE nodes、RIS 與 direct-link
+軸歸一化的 edge features。AP–UE node 初始狀態由所有 RIS tokens 的 mean/max
+pooling 產生，後續 $D$ 層只保留 self state 與 other-node max message。
+
+產生 RIS proposal 時，shared phase head 將 $\mathbf z^{(0)}_{r,k}$ 與最後的
+AP–UE state 合併成 link tokens，再對 AP $l$ 服務的 nodes 作 masked mean/max pooling，
+輸出 $2N$ logits，local projection 後產生 $N$ 個 phase proposals。所有 AP 共用
+link encoder 與 phase head；AP-specific 部分仍是 beamforming power-control modules。
+
+### 11.3 G2：G1 + per-RIS context
+
+G2 的 proposal head 與 energy consensus 完全同 G1。唯一介入是在每層
+AP–UE node update 加入由 link-token bank 得到的 context：
+
+$$
+\mathbf c_k
+=
+\sum_r \bar e^{(R)}_{k,r}\mathbf z^{(0)}_{r,k}.
+$$
+
+這個 context 沒有額外的 attention 或 CPU 參數；它只把原本在 G1 初始 pooling
+後被壓縮的 per-RIS structure 帶回 AP–UE updates。G2 的額外參數來自
+update layer 接收較寬輸入，不來自 consensus。
+
+### 11.4 因果解讀邊界
+
+- G0→G1 同時移除 RIS node、更換 link encoder／phase head，並改變容量；它是
+  representation package 比較，不是單一 layer-removal ablation。
+- G1→G2 只加 per-RIS context，是較乾淨的 context ablation。
+- Energy weight 固定且 detach，但 proposal 與 beamformer 仍由 global sum-rate loss 進行
+  centralized training。
+- G2-150k 的優勢目前只在 seed 0、固定 topology 上成立；數值與完整
+  統計見[實驗報告](./decentralized_ris_experiments.md)。

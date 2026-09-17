@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# E03: evaluate the greedy 2-bit phase reference over retained R0 sweeps.
 set -euo pipefail
 
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -8,9 +9,9 @@ ris_python=${RIS_PYTHON:-python}
 device=${DEVICE:-cuda:0}
 rounds=${ROUNDS:-4}
 artifact_root=${ARTIFACT_ROOT:-../../artifacts/decentralized_ris}
-m_root="$artifact_root/results_batch_8_BS-radius_200_RIS-radius_100_vary_M"
-p_root="$artifact_root/results_batch_8_BS-radius_200_RIS-radius_100_vary_Pmax"
-out="$artifact_root/discrete_cd"
+m_root="$artifact_root/e08_baseline_sweeps/vary_m"
+p_root="$artifact_root/e08_baseline_sweeps/vary_pmax"
+out="$artifact_root/e03_phase_headroom/discrete_cd"
 
 run_cell() {
     local checkpoint=$1

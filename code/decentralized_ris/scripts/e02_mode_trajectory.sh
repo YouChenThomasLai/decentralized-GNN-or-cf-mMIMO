@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# E02: evaluate centralized, paper-decentralized, and own-only trajectories.
 # Sum rate versus training steps in all three CSI visibility modes.
 #
 # Every checkpoint named iter<iteration>.pt under CKPT_DIR is evaluated with
@@ -15,7 +16,7 @@ device=${DEVICE:-cuda:0}
 samples=${SAMPLES:-800}
 artifact_root=${ARTIFACT_ROOT:-../../artifacts/decentralized_ris}
 ckpt_dir=${CKPT_DIR:-trajectory_ckpts}
-out=${OUT_DIR:-$artifact_root/mode_trajectory}
+out=${OUT_DIR:-$artifact_root/e02_input_modes}
 
 shopt -s nullglob
 checkpoints=("$ckpt_dir"/iter*.pt)

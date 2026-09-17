@@ -31,7 +31,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--dir",
-        default="../../artifacts/decentralized_ris/energy_consensus_verification")
+        default="../../artifacts/decentralized_ris/e05_energy_consensus/verification")
     parser.add_argument("--seed", type=int, default=20260922)
     parser.add_argument("--out", default=None)
     args = parser.parse_args()

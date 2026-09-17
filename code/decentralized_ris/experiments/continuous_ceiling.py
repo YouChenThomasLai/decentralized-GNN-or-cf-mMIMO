@@ -128,7 +128,8 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda:0")
     p.add_argument(
-        "--out_dir", default="../../artifacts/decentralized_ris/continuous_ceiling"
+        "--out_dir",
+        default="../../artifacts/decentralized_ris/e03_phase_headroom/continuous_ceiling",
     )
     args = p.parse_args()
 

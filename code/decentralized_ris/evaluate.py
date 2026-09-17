@@ -168,12 +168,12 @@ def main():
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
         "--arch_override",
-        choices=("r0c", "r1_shared", "r1_ap_ris_mag"),
+        choices=("r0c", "r1_shared", "r1_ap_ris_mag", "g0"),
         help="evaluate an R0 checkpoint through a state-compatible action path",
     )
     parser.add_argument(
         "--out",
-        default="../../artifacts/decentralized_ris/evaluation/final_screening.json",
+        default="../../artifacts/decentralized_ris/e04_action_interfaces/evaluation/final_screening.json",
     )
     args = parser.parse_args()
 
@@ -192,10 +192,12 @@ def main():
         config = summary["config"].copy()
         source_arch = config["arch"]
         if args.arch_override:
-            if source_arch not in ("r0", "r0c", "r1_shared", "r1_ap_ris_mag"):
+            if source_arch not in (
+                "r0", "r0c", "r1_shared", "r1_ap_ris_mag", "g0"
+            ):
                 raise SystemExit(
                     "--arch_override requires a shared-reduction checkpoint "
-                    f"(r0/r0c/r1_shared/r1_ap_ris_mag), got {source_arch}"
+                    f"(r0/r0c/r1_shared/r1_ap_ris_mag/g0), got {source_arch}"
                 )
             config["arch"] = args.arch_override
             config["consensus"] = variants.default_consensus(args.arch_override)
