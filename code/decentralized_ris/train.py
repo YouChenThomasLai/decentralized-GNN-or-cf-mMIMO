@@ -9,8 +9,16 @@ import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
+import dnn
 import variants
-from evaluate import build_model, evaluate_model, resolve_device, seed_everything, temporary_seed
+from evaluate import (
+    build_model,
+    default_consensus,
+    evaluate_model,
+    resolve_device,
+    seed_everything,
+    temporary_seed,
+)
 from model import load_checkpoint
 from simulation import ChannelSimulator
 from variants import unit_modulus_error
@@ -18,9 +26,17 @@ from variants import unit_modulus_error
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--arch", default="r0", choices=variants.ARCHS)
+    parser.add_argument(
+        "--arch",
+        default="r0",
+        choices=tuple(variants.ARCHS) + dnn.DNN_ARCHS,
+    )
     parser.add_argument("--identity", default="none", choices=variants.IDENTITIES)
-    parser.add_argument("--consensus", default=None, choices=list(variants.CONSENSUS))
+    parser.add_argument(
+        "--consensus",
+        default=None,
+        choices=list(variants.CONSENSUS) + list(dnn.DNN_CONSENSUS),
+    )
     parser.add_argument("--tau", type=float, default=1.0)
     parser.add_argument("--tag", default=None)
 
@@ -31,6 +47,14 @@ def parse_args():
     parser.add_argument("--AP", type=int, default=5, help="number of APs")
     parser.add_argument("--D", type=int, default=6, help="message-passing depth")
     parser.add_argument("--ch", type=int, default=64, help="hidden width")
+    parser.add_argument(
+        "--dnn_width", type=int, default=40,
+        help="MLP width of the d0/d1 control; declared for parameter matching",
+    )
+    parser.add_argument(
+        "--dnn_depth", type=int, default=3,
+        help="number of d0/d1 hidden layers, including the input projection",
+    )
     parser.add_argument("--pmax_dbm", "--Pmax", dest="pmax_dbm", type=float, default=15.0)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--assoc_threshold", type=float, default=0.1)
@@ -58,20 +82,27 @@ def gate_report(model, simulator, users_per_ap, threshold, device):
     features, edges, masks, direct, _ = simulator.training_batch(
         users_per_ap, threshold, threshold
     )
-    features, edges, direct = features.to(device), edges.to(device), direct.to(device)
-    beamformer, phase = model.centralized(features, edges, masks, direct)
-    loss, rate, _ = simulator.loss(beamformer, phase, device)
-    loss.backward()
-    gradients = [parameter.grad for parameter in model.parameters() if parameter.grad is not None]
-    gradient_norm = torch.sqrt(sum((gradient.detach() ** 2).sum() for gradient in gradients))
-    central = {
-        "beamformer_finite": bool(torch.isfinite(beamformer).all()),
-        "phase_finite": bool(torch.isfinite(phase).all()),
-        "unit_modulus_error": unit_modulus_error(phase),
-        "sum_rate": float(rate.detach()),
-        "gradient_norm": float(gradient_norm),
-    }
-    model.zero_grad(set_to_none=True)
+    central = None
+    if getattr(model, "supports_centralized", True):
+        features, edges, direct = features.to(device), edges.to(device), direct.to(device)
+        beamformer, phase = model.centralized(features, edges, masks, direct)
+        loss, rate, _ = simulator.loss(beamformer, phase, device)
+        loss.backward()
+        gradients = [
+            parameter.grad for parameter in model.parameters() if parameter.grad is not None
+        ]
+        gradient_norm = torch.sqrt(sum((gradient.detach() ** 2).sum() for gradient in gradients))
+        central = {
+            "beamformer_finite": bool(torch.isfinite(beamformer).all()),
+            "phase_finite": bool(torch.isfinite(phase).all()),
+            "unit_modulus_error": unit_modulus_error(phase),
+            "sum_rate": float(rate.detach()),
+            "gradient_norm": float(gradient_norm),
+        }
+        model.zero_grad(set_to_none=True)
+    if not getattr(model, "supports_decentralized", True):
+        # A centralized-only control has no eq. (10) inference path to gate.
+        return {"centralized": central, "decentralized": None}
 
     features, edges, masks, direct = simulator.decentralized_batch(
         users_per_ap, threshold, threshold, regenerate_channels=False
@@ -92,18 +123,28 @@ def gate_report(model, simulator, users_per_ap, threshold, device):
 
 
 def gate_passed(report):
+    """Gate whichever deployment modes the arm actually defines."""
     central = report["centralized"]
     decentralized = report["decentralized"]
-    return (
-        central["beamformer_finite"]
-        and central["phase_finite"]
-        and decentralized["beamformer_finite"]
-        and decentralized["phase_finite"]
-        and central["unit_modulus_error"] < 1e-6
-        and decentralized["unit_modulus_error"] < 1e-6
-        and np.isfinite(central["gradient_norm"])
-        and central["gradient_norm"] > 0
-    )
+    if central is None and decentralized is None:
+        return False
+    passed = True
+    if central is not None:
+        passed = (
+            central["beamformer_finite"]
+            and central["phase_finite"]
+            and central["unit_modulus_error"] < 1e-6
+            and np.isfinite(central["gradient_norm"])
+            and central["gradient_norm"] > 0
+        )
+    if decentralized is not None:
+        passed = (
+            passed
+            and decentralized["beamformer_finite"]
+            and decentralized["phase_finite"]
+            and decentralized["unit_modulus_error"] < 1e-6
+        )
+    return passed
 
 
 def save_checkpoint(path, model, optimizer, iteration, config):
@@ -149,7 +190,7 @@ def main():
         args.test_sample_val = 80
         args.save_every = 0
 
-    args.consensus = args.consensus or variants.default_consensus(args.arch)
+    args.consensus = args.consensus or default_consensus(args.arch)
     seed_everything(args.seed)
     device = resolve_device(args.device)
     simulator = ChannelSimulator(
@@ -186,9 +227,41 @@ def main():
 
     train_curve = []
     validation_curve = []
-    best = {"decentralized": -float("inf"), "iteration": None}
+    # d0 has no eq. (10) path, so its checkpoint is selected on its own
+    # deployment mode instead of on a NaN decentralized field.
+    selection_key = (
+        "decentralized" if getattr(model, "supports_decentralized", True)
+        else "centralized"
+    )
+    best = {selection_key: -float("inf"), "iteration": None}
     window = []
     started = time.time()
+
+    def run_validation(module, iteration):
+        """Deterministic validation pass shared by every arm and training rule."""
+        with temporary_seed(args.val_seed):
+            batches, _, _ = evaluate_model(
+                module,
+                simulator,
+                args.K,
+                args.assoc_threshold,
+                device,
+                args.test_sample_val,
+                args.batch_size,
+            )
+        row = {"iteration": iteration}
+        row.update({key: float(values.mean()) for key, values in batches.items()})
+        print(
+            f"[val {tag} {iteration}] cen={row['centralized']:.5f} "
+            f"dec={row['decentralized']:.5f} "
+            f"dec_2bit={row['decentralized_discrete']:.5f} "
+            f"select={selection_key}"
+        )
+        if writer:
+            for key, value in row.items():
+                if key != "iteration":
+                    writer.add_scalar(f"validation/{key}", value, iteration)
+        return row
 
     for step in range(1, args.n_iter + 1):
         model.train()
@@ -230,29 +303,9 @@ def main():
             window = []
 
         if step % args.eval_interval == 0 or step == args.n_iter:
-            with temporary_seed(args.val_seed):
-                batches, _, _ = evaluate_model(
-                    model,
-                    simulator,
-                    args.K,
-                    args.assoc_threshold,
-                    device,
-                    args.test_sample_val,
-                    args.batch_size,
-                )
-            row = {"iteration": iteration}
-            row.update({key: float(values.mean()) for key, values in batches.items()})
+            row = run_validation(model, iteration)
             validation_curve.append(row)
-            print(
-                f"[val {tag} {iteration}] cen={row['centralized']:.5f} "
-                f"dec={row['decentralized']:.5f} "
-                f"dec_2bit={row['decentralized_discrete']:.5f}"
-            )
-            if writer:
-                for key, value in row.items():
-                    if key != "iteration":
-                        writer.add_scalar(f"validation/{key}", value, iteration)
-            if row["decentralized"] > best["decentralized"]:
+            if row[selection_key] > best[selection_key]:
                 best = dict(row)
                 save_checkpoint(
                     os.path.join(checkpoint_dir, "best.pt"),
@@ -289,10 +342,13 @@ def main():
             model, simulator, args.K, args.assoc_threshold, device
         ),
         "best_val": best,
+        "selection_key": selection_key,
         "total_iterations": final_iteration,
         "wall_clock_s": time.time() - started,
     }
     if args.test_sample_final:
+        best_path = os.path.join(checkpoint_dir, "best.pt")
+        load_checkpoint(model, best_path, device)
         with temporary_seed(args.eval_seed):
             batches, unit_error, per_user = evaluate_model(
                 model,
@@ -304,6 +360,8 @@ def main():
                 args.batch_size,
             )
         summary["final_eval"] = {
+            "checkpoint": "best.pt",
+            "checkpoint_iteration": best["iteration"],
             "samples": args.test_sample_final,
             "unit_modulus_error": unit_error,
             "per_user_rate": per_user.tolist(),

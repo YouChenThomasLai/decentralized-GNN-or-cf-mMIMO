@@ -8,6 +8,10 @@ Research documentation starts at [doc/README.md](doc/README.md). The two main
 reports are the [method report](doc/decentralized_ris_methods.md) and the
 [experiment report](doc/decentralized_ris_experiments.md).
 
+The active research method is G2. G1 is retained only as the no-context
+ablation used to attribute G2's design; it is not a separate finalist or a
+competing research direction.
+
 ## Setup
 
 From the repository root:
@@ -34,8 +38,9 @@ python train.py \
 
 `M` is the antenna count per AP, `N` is the element count per RIS, `L` is the
 RIS count, and `K` is the user count per AP. The default is the `r0` baseline,
-with seed `0`. The canonical graph methods use `--arch g0`, `--arch g1`, and
-`--arch g2`; their definitions are in the
+with seed `0`. The proposed method uses `--arch g2`; `--arch g1` is its
+no-context ablation and `--arch g0` is the RIS-node representation control.
+Their definitions are in the
 [method report](doc/decentralized_ris_methods.md#graph-variants). Use
 `python train.py --help` for the full interface.
 
@@ -92,7 +97,7 @@ code/decentralized_ris/
 ├── train.py            # the only training entry point
 ├── evaluate.py         # paired evaluation, seeding, and checkpoint helpers
 ├── model.py            # canonical vectorized baseline network
-├── variants.py         # R0/R1/G0/G1/G2 action and aggregation variants
+├── variants.py         # proposed G2, G1 ablation, and R0/R1/G0 controls
 ├── simulation.py       # topology, channel generation, and model inputs
 ├── rates.py            # rate objective, phase baselines, and cached evaluation
 ├── experiments/        # optional analyses, invoked with python -m

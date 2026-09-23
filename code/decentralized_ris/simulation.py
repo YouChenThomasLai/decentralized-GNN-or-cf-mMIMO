@@ -26,7 +26,8 @@ class BaseStation:
 class ChannelSimulator:
     """Stateful topology and channel generator used by training and evaluation."""
 
-    def __init__(self, n_antennas, n_elements, n_ris, batch_size, n_ap=5):
+    def __init__(self, n_antennas, n_elements, n_ris, batch_size, n_ap=5,
+                 layout=None):
         self.n_antennas = n_antennas
         self.n_elements = n_elements
         self.n_ris = n_ris
@@ -35,6 +36,19 @@ class ChannelSimulator:
         self.radius = 100
         self.ap_locations = ring_locations(n_ap, self.radius * 2)
         self.ris_locations = ring_locations(n_ris, self.radius)
+        if layout is not None:
+            ap = np.asarray(layout["ap_locations"], dtype=float)
+            ris = np.asarray(layout["ris_locations"], dtype=float)
+            if ap.shape != (n_ap, 2) or ris.shape != (n_ris, 2):
+                raise ValueError("layout coordinate shape does not match AP/RIS count")
+            if not np.isfinite(ap).all() or not np.isfinite(ris).all():
+                raise ValueError("layout coordinates must be finite")
+            self.ap_locations, self.ris_locations = ap, ris
+            if "user_radius" in layout:
+                user_radius = float(layout["user_radius"])
+                if not np.isfinite(user_radius) or user_radius <= 0:
+                    raise ValueError("layout user_radius must be positive and finite")
+                self.radius = user_radius
         self.base_stations = [
             BaseStation(n_antennas, n_elements, n_ris, location, self.ris_locations)
             for location in self.ap_locations

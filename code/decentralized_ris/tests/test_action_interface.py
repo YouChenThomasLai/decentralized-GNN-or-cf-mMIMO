@@ -129,7 +129,35 @@ def test_ap_ris_mag_changes_only_the_consensus_weight():
     torch.testing.assert_close(trace["weights"], expected, rtol=1e-6, atol=1e-6)
 
 
+def test_circular_consensus_symmetries_and_zero_resultant():
+    angles = torch.tensor([0.0, 0.7, -1.1]).view(1, 3, 1, 1)
+    proposals = torch.stack((angles.cos(), angles.sin()), dim=-1)
+    active = torch.ones(1, 3)
+    weights = torch.tensor([[[1.0], [2.0], [3.0]]])
+    phase, _ = circular_consensus(proposals, active, weights=weights)
+
+    order = [2, 0, 1]
+    permuted, _ = circular_consensus(
+        proposals[:, order], active[:, order], weights=weights[:, order]
+    )
+    torch.testing.assert_close(permuted, phase)
+
+    shift = torch.tensor(0.4)
+    rotation = torch.tensor([[shift.cos(), -shift.sin()],
+                             [shift.sin(), shift.cos()]])
+    rotated, _ = circular_consensus(
+        proposals @ rotation.T, active, weights=weights
+    )
+    torch.testing.assert_close(rotated, phase @ rotation.T, atol=1e-6, rtol=1e-6)
+    torch.testing.assert_close(rotated.norm(dim=-1), torch.ones_like(rotated[..., 0]))
+
+    opposite = torch.tensor([[[[[1.0, 0.0]]], [[[-1.0, 0.0]]]]])
+    fallback, _ = circular_consensus(opposite, torch.ones(1, 2))
+    torch.testing.assert_close(fallback, torch.tensor([[[[1.0, 0.0]]]]))
+
+
 if __name__ == "__main__":
     test_commuted_reduction_and_projection_order()
     test_shared_variants_are_checkpoint_compatible()
     test_ap_ris_mag_changes_only_the_consensus_weight()
+    test_circular_consensus_symmetries_and_zero_resultant()
