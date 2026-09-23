@@ -10,6 +10,7 @@ import random
 import numpy as np
 import torch
 
+import dnn
 import variants
 from model import load_checkpoint
 from rates import quantize_phase, random_phase_like
@@ -74,6 +75,17 @@ def evaluate_model(
     records = {key: [] for key in keys}
     unit_error = {"centralized": 0.0, "decentralized": 0.0}
     per_user = []
+    # Each arm is scored only in the deployment modes it actually defines: the
+    # centralized-only control (E10 `d0`) has no AP-originated RIS message. The
+    # undefined fields stay NaN instead of being silently filled.
+    decentralized_mode = getattr(model, "supports_decentralized", True)
+    centralized_mode = getattr(model, "supports_centralized", True)
+    if not (centralized_mode or decentralized_mode):
+        raise ValueError("a model must define at least one deployment mode")
+    if not decentralized_mode:
+        unit_error["decentralized"] = float("nan")
+    if not centralized_mode:
+        unit_error["centralized"] = float("nan")
     model.eval()
 
     with torch.no_grad():
@@ -81,24 +93,37 @@ def evaluate_model(
             features, edges, masks, direct, _ = simulator.training_batch(
                 users_per_ap, threshold, threshold
             )
-            features, edges, direct = (
-                features.to(device), edges.to(device), direct.to(device)
-            )
-            beamformer, phase = model.centralized(features, edges, masks, direct)
-            unit_error["centralized"] = max(
-                unit_error["centralized"],
-                float((phase.norm(dim=-1) - 1).abs().max()),
-            )
-            _, rate, _ = simulator.loss(beamformer, phase, device)
-            records["centralized"].append(float(rate))
-            _, rate, _ = simulator.loss(
-                beamformer, quantize_phase(phase, num_bits), device
-            )
-            records["centralized_discrete"].append(float(rate))
-            _, rate, _ = simulator.loss(
-                beamformer, random_phase_like(phase), device
-            )
-            records["centralized_random_phase"].append(float(rate))
+            if not centralized_mode:
+                for key in ("centralized", "centralized_discrete",
+                            "centralized_random_phase"):
+                    records[key].append(float("nan"))
+            else:
+                features, edges, direct = (
+                    features.to(device), edges.to(device), direct.to(device)
+                )
+                beamformer, phase = model.centralized(features, edges, masks, direct)
+                unit_error["centralized"] = max(
+                    unit_error["centralized"],
+                    float((phase.norm(dim=-1) - 1).abs().max()),
+                )
+                _, rate, user_rates = simulator.loss(beamformer, phase, device)
+                records["centralized"].append(float(rate))
+                if not decentralized_mode:
+                    per_user.append(user_rates.detach().cpu().numpy())
+                _, rate, _ = simulator.loss(
+                    beamformer, quantize_phase(phase, num_bits), device
+                )
+                records["centralized_discrete"].append(float(rate))
+                _, rate, _ = simulator.loss(
+                    beamformer, random_phase_like(phase), device
+                )
+                records["centralized_random_phase"].append(float(rate))
+
+            if not decentralized_mode:
+                for key in ("decentralized", "decentralized_discrete",
+                            "decentralized_random_phase"):
+                    records[key].append(float("nan"))
+                continue
 
             features, edges, masks, direct = simulator.decentralized_batch(
                 users_per_ap, threshold, threshold, regenerate_channels=False
@@ -130,9 +155,35 @@ def evaluate_model(
     )
 
 
+def default_consensus(arch):
+    """Dispatch the per-arch default so every config round-trips through summaries."""
+    if dnn.is_dnn(arch):
+        return dnn.default_consensus(arch)
+    return variants.default_consensus(arch)
+
+
 def build_model(config, simulator, device):
     pmax = 10 ** ((config["pmax_dbm"] - 30) / 10)
-    consensus = config.get("consensus") or variants.default_consensus(config["arch"])
+    consensus = config.get("consensus") or default_consensus(config["arch"])
+    if dnn.is_dnn(config["arch"]):
+        return dnn.DnnNet(
+            config["M"],
+            config["N"],
+            config["L"],
+            config["D"],
+            pmax,
+            config["ch"],
+            config["AP"],
+            device,
+            arch=config["arch"],
+            identity=config["identity"],
+            consensus=consensus,
+            tau=config["tau"],
+            ris_loc=simulator.ris_locations,
+            users_per_ap=config["K"],
+            width=config.get("dnn_width", 40),
+            depth=config.get("dnn_depth", 3),
+        ).to(device)
     return VariantNet(
         config["M"],
         config["N"],

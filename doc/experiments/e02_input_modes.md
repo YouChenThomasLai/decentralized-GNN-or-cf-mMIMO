@@ -3,9 +3,10 @@
 ## 1. Status
 
 - Question: Which inference gap shrinks with training, and which remains tied to input visibility?
-- Status: **Completed diagnostic**
-- Updated: 2026-09-16
-- Scope: 11 checkpoints, one shared 800-sample paired trajectory, seed 0 training
+- Status: **Completed diagnostic, with a frozen G2/R0 endpoint continuation**
+- Updated: 2026-09-20
+- Scope: 11-checkpoint R0 trajectory on 800 paired samples; G2-150k/R0-500k endpoint on 400
+  newly paired samples; training seed 0
 - Method: [CSI input modes](../decentralized_ris_methods.md#notation)
 - Primary artifacts: `artifacts/decentralized_ris/e02_input_modes/`
 
@@ -14,6 +15,10 @@
 From 150k to 500k, the centralized−paper-decentralized gap shrinks by 37.5%, while the
 paper-decentralized−own-only gap does not shrink. Own-only is also unstable across nearby
 checkpoints, so it must always be reported with a checkpoint identifier or a checkpoint average.
+In the matched-seed frozen-checkpoint continuation, G2's own-only visibility penalty is *larger*
+than R0's by $4.7404\pm0.3469$ bps/Hz (95% batch-cluster interval $[4.0605,5.4204]$).
+Thus G2 preserves a smaller centralized−decentralized gap with the paper's shared-UE CSI, but
+does not preserve it when that extra CSI is removed completely.
 
 ## 3. Setup
 
@@ -23,6 +28,13 @@ generation occurs once and all modes reuse it. The three modes are:
 - centralized: one model sees all relevant CSI;
 - paper-decentralized: AP $l$ sees the paper's shared-UE neighborhood;
 - own-only: AP $l$ sees only its own link block; this is an ablation, not the paper method.
+
+The continuation freezes E06 G2-150k (`iter150000.pt`) and E01 R0-500k
+(`model_final_run0.pt`), then evaluates centralized, paper-decentralized, and own-only modes on
+the same 400 canonical-topology channel samples (evaluation seed 20260920, 50 batches of eight).
+Only the inference visibility mask changes between paper and own-only. The predeclared contrast is
+$(R_{\rm paper}-R_{\rm own})_{\rm G2}-(R_{\rm paper}-R_{\rm own})_{\rm R0}$; a negative interval
+would support the proposed G2 robustness at this extreme endpoint.
 
 ## 4. Results
 
@@ -55,6 +67,18 @@ Visibility and signaling under the fixed topology:
 | Paper-decentralized | 17.576 | 43,588 | 2,640 |
 | Own-only | 4.790 | 11,879 | 2,640 |
 
+Frozen-checkpoint continuation on the same 400 samples:
+
+| Model | Centralized | Paper-dec. | Own-only | Cen−paper | Cen−own | Paper−own |
+|---|---:|---:|---:|---:|---:|---:|
+| G2-150k | 23.3572 | 22.9587 | 11.4554 | 0.3985 | 11.9018 | 11.5033 |
+| R0-500k | 23.0898 | 20.7113 | 13.9484 | 2.3785 | 9.1414 | 6.7629 |
+
+The paired difference of visibility penalties, G2−R0, is $+4.7404\pm0.3469$ bps/Hz with 95%
+interval $[4.0605,5.4204]$. Mean visible AP–UE nodes per AP fall from 17.012 in paper mode to
+4.697 in own-only mode for both methods. The centralized and paper batch arrays exactly equal
+E14's T0 arrays for both models, confirming that the only new intervention is own-only visibility.
+
 ## 5. Interpretation
 
 - Longer centralized training helps the paper-decentralized path catch up, but does not remove the
@@ -63,15 +87,37 @@ Visibility and signaling under the fixed topology:
   mismatch; this experiment does not identify their individual shares.
 - Paper-decentralized inference saves fronthaul relative to centralized inference, but its larger
   UE→AP feedback makes total signaling higher when air-interface feedback is counted.
+- The proposed ranking reverses at the own-only endpoint: G2 has a smaller C−D gap than R0 with
+  full paper visibility, but a larger gap with no shared-UE cross-AP CSI. Its trained policy depends
+  more strongly on that extra information at this checkpoint. This is an inference-time sensitivity,
+  not evidence that G2 would remain worse after training for the restricted view.
+- The own-only endpoint changes the information mode, so it cannot stand in for a topology that
+  naturally supplies less shared-UE CSI. [E14's visibility pair](./e14_topology_stress.md) runs
+  that test instead: holding the paper-decentralized mode fixed and moving the AP ring from 140 m
+  to 350 m raises the visible-link fraction from 0.2860 to 0.6170, and G2 keeps the smaller
+  relative gap at every point, 4.25%→2.10% against R0's 14.26%→6.77%. The reversal above is
+  therefore a property of the ablation endpoint, not of naturally sparse visibility.
 
 ## 6. Limitations
 
 - Own-only was not retrained with its own input distribution.
 - All checkpoints come from one training trajectory and one topology.
 - The 800 samples give paired precision but do not add training-seed replication.
+- The G2/R0 continuation tests the two visibility endpoints only. It does not establish how gaps
+  change under partial CSI removal or a model retrained for reduced visibility; E14's visibility
+  pair covers the layout axis under an unchanged information mode.
 
 ## 7. Reproduction and artifacts
 
 `artifacts/decentralized_ris/e02_input_modes/` contains 11 `iter*/` cells, paired NPZ files,
 `trajectory.json`, text summaries, logs, and log/linear-axis plots. The driver is
 `code/decentralized_ris/scripts/e02_mode_trajectory.sh`.
+
+The continuation is in
+`artifacts/decentralized_ris/e02_input_modes/g2_r0_visibility_seed20260920/`: pre-registration,
+`results.json`, and the 50 paired batch rates per arm/mode in `results.npz`. From
+`code/decentralized_ris/`, run:
+
+```bash
+python -m experiments.visibility_pair --samples 400 --eval_seed 20260920 --device cuda:0 --out ../../artifacts/decentralized_ris/e02_input_modes/g2_r0_visibility_seed20260920/results.json
+```
