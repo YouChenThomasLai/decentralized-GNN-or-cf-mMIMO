@@ -1,162 +1,128 @@
 # Decentralized GNN Beamforming
 
 Research code for joint beamforming in multi-RIS-aided cell-free networks. The
-training pipeline compares centralized and decentralized GNN inference with
-continuous, 2-bit discrete, and random RIS phase shifts.
+active implementation compares centralized training and decentralized
+inference under continuous, 2-bit, and random RIS phase settings.
+
+Research documentation starts at [doc/README.md](doc/README.md). The two main
+reports are the [method report](doc/decentralized_ris_methods.md) and the
+[experiment report](doc/decentralized_ris_experiments.md).
 
 ## Setup
 
-Create the Conda environment from the repository root:
+From the repository root:
 
 ```bash
 conda env create -f code/environment.yml
 conda activate decentralized-inference
-cd code/stage0
+cd code/decentralized_ris
 ```
 
-The environment uses Python 3.11 and installs PyTorch from the CUDA 12.8 wheel
-index. Training also supports CPU execution with `--device cpu`.
+The environment uses Python 3.11 and the CUDA 12.8 PyTorch wheel. CPU execution
+is available with `--device cpu`.
 
-## Run an experiment
+## Train and evaluate
+
+Run one seed while exploring a research direction:
 
 ```bash
-python trainer_2.py \
+python train.py \
   --M 2 --N 30 --L 4 --K 8 \
-  --pmax_dbm 15 --batch_size 8 --runs 1 \
-  --device cuda:0 --out_dir results_local
+  --pmax_dbm 15 --batch_size 8 --n_iter 2000 \
+  --test_sample_final 3200 --device cuda:0
 ```
 
-Here, `M` is the number of antennas per access point, `N` the number of RIS
-elements, `L` the number of RISs, `K` the number of users, and `pmax_dbm` the
-per-access-point transmit-power limit in dBm. Run `python trainer_2.py --help`
-for all options.
+`M` is the antenna count per AP, `N` is the element count per RIS, `L` is the
+RIS count, and `K` is the user count per AP. The default is the `r0` baseline,
+with seed `0`. The canonical graph methods use `--arch g0`, `--arch g1`, and
+`--arch g2`; their definitions are in the
+[method report](doc/decentralized_ris_methods.md#graph-variants). Use
+`python train.py --help` for the full interface.
 
-The random seed is fixed to `0`. Results are written under a parameter-named
-directory such as:
+Unassigned exploratory runs default to `artifacts/decentralized_ris/scratch/runs/`, outside the
+source tree. Move a retained run into its E01–E09 folder after assigning it to a maintained
+experiment. A run has one stable layout:
 
 ```text
-results_local/M2_N30_L4_K8_P15.0/run0/
-├── arrays/
-├── final_eval/
-├── logs/
-└── models/
+artifacts/decentralized_ris/scratch/runs/<tag>_iter2000_seed0/
+├── checkpoints/
+│   ├── best.pt
+│   └── last.pt
+├── metrics.npz
+└── summary.json
 ```
 
-Inspect training logs with:
+Add `--tensorboard` to write TensorBoard events inside the run directory. To
+re-evaluate one or more completed runs on the same paired random samples:
 
 ```bash
-tensorboard --logdir results_local
+python evaluate.py \
+  --runs '../../artifacts/decentralized_ris/scratch/runs/*' \
+  --checkpoint best.pt --samples 3200 --device cuda:0
 ```
 
-## Run and summarize sweeps
+The evaluator writes a readable JSON summary and a paired NPZ file for later
+statistical comparisons.
 
-`run_exp-v2.sh` runs the configured `M` and `pmax_dbm` sweeps on `cuda:0`:
+## Sweeps and plots
+
+The maintained sweep varies `M` and `pmax_dbm`, always with one seed:
 
 ```bash
-bash run_exp-v2.sh
+bash scripts/e08_baseline_sweeps.sh
 ```
 
-Summarize the default `M` sweep with the wrapper script:
-
-```bash
-bash excel_helper.sh
-```
-
-Alternatively, pass either result directory directly to the Python helper:
-
-```bash
-python excel_helper.py --root results_batch_8_BS-radius_200_RIS-radius_100_vary_M
-python excel_helper.py --root results_batch_8_BS-radius_200_RIS-radius_100_vary_Pmax
-```
-
-Plot either summary by passing the workbook, x-axis label, and output path
-without a file extension:
+Override `RIS_PYTHON`, `DEVICE`, or `ARTIFACT_ROOT` through environment
+variables when running remotely. Plot a completed sweep directly from its JSON
+summaries; no Excel conversion step is needed:
 
 ```bash
 python ../plot-v2.py \
-  --excel results_batch_8_BS-radius_200_RIS-radius_100_vary_M/summary_M.xlsx \
+  --results-root ../../artifacts/decentralized_ris/e08_baseline_sweeps/vary_m \
   --x-label '$M$' \
-  --output-base stage0_ppt_assets/stage0_vary_M
-
-python ../plot-v2.py \
-  --excel results_batch_8_BS-radius_200_RIS-radius_100_vary_Pmax/summary_P.xlsx \
-  --x-label '$P_{\mathrm{max}}$ (dBm)' \
-  --output-base stage0_ppt_assets/stage0_vary_Pmax
+  --output-base ../../artifacts/decentralized_ris/e08_baseline_sweeps/plots/vary_m
 ```
 
-Each command writes both PDF and PNG versions of the plot.
+Each plot command writes PDF and PNG files.
 
-## Code guide
+## Code layout
 
-### `stage0/trainer_2.py`
+```text
+code/decentralized_ris/
+├── train.py            # the only training entry point
+├── evaluate.py         # paired evaluation, seeding, and checkpoint helpers
+├── model.py            # canonical vectorized baseline network
+├── variants.py         # R0/R1/G0/G1/G2 action and aggregation variants
+├── simulation.py       # topology, channel generation, and model inputs
+├── rates.py            # rate objective, phase baselines, and cached evaluation
+├── experiments/        # optional analyses, invoked with python -m
+├── scripts/            # maintained eNN-prefixed experiment commands
+└── tests/              # lightweight numerical regression checks
+```
 
-The main training and inference module. `Trainer` creates `MyDataLoader`,
-associates every access point (AP) with the RISs, builds the `node_update`
-network, and manages training, evaluation, logging, and saved artifacts.
+Optional analyses include discrete coordinate descent, a continuous ceiling,
+the local-CSI ablation, confidence diagnostics, and discrete-result summaries:
 
-- `train_batch()` performs one centralized training step and returns loss, sum
-  rate, and per-user rates.
-- `train()` runs the fixed 2,000-iteration training loop, periodic validation,
-  final evaluation, and artifact saving.
-- `eval()` compares centralized and decentralized inference using continuous,
-  2-bit discrete, random, and random-discrete RIS phases.
+```bash
+python -m experiments.discrete_cd --help
+python -m experiments.continuous_ceiling --help
+python -m experiments.local_csi --help
+python -m experiments.confidence --help
+python -m experiments.summarize_cd --help
+```
 
-### `stage0/model_2.py`
-
-Defines the GNN and readout networks:
-
-- `initial_layer` encodes user and RIS features.
-- `node_update_layer` performs message passing and updates node features.
-- `BS_readout` predicts beamforming weights.
-- `RIS_readout_AP` produces an RIS prediction from each AP, and `RIS_merge`
-  combines those predictions into normalized phase vectors.
-- `coeff_DNN2` predicts each AP's power-control coefficient.
-- `node_update` connects the full model. Its `training=True` forward path is
-  centralized; `training=False` uses decentralized AP-local inputs.
-
-### `stage0/data.py`
-
-Defines the wireless topology and data pipeline. `Base_station` and `RIS` hold
-topology and channel state. `MyDataLoader` generates channels, associates users
-with APs using received signal strength, creates centralized or decentralized
-model inputs, and delegates sum-rate loss calculation to
-`utils_return_indivial_rates.py`.
-
-The key methods are `BS_RIS_association()`, `BS_user_association()`,
-`load_data()`, `gen_training_data()`, `gen_testing_data()`, and
-`compute_loss()`.
-
-### `stage0/utils_return_indivial_rates.py`
-
-Contains geometry, channel simulation, RIS quantization, and rate utilities.
-`Channel` generates small- and large-scale fading; `generate_channel()` builds
-the AP-RIS-user and direct AP-user channels; `discrete_mapping()` maps phases to
-a requested bit resolution; and `cal_loss()` computes user rates, sum rate, and
-the negative-sum-rate training loss.
-
-### `stage0/excel_helper.py`
-
-Scans parameter-named experiment directories, detects the swept variable, and
-writes the `run0` final-evaluation metrics to `summary_<variable>.xlsx`.
-
-### `plot-v2.py`
-
-Reads a summary workbook and produces publication-style PDF and PNG plots
-comparing the selected centralized and decentralized methods. Pass the input
-workbook, x-axis label, and output path with `--excel`, `--x-label`, and
-`--output-base`.
-
-The Stage 0 parameter sweeps are defined in `stage0/run_exp-v2.sh`. Stage 1
-and Stage 2 keep their own source, scripts, and local results under
-`stage1/` and `stage2/`; research notes and reference material are under
-`doc/`.
+Old checkpoints remain loadable through the narrow compatibility logic in
+`model.load_checkpoint`. Frozen historical prototypes live under
+`code/snapshot_network_scaling/`; do not develop new changes there.
 
 ## Development checks
 
-From `code/stage0/`:
+From `code/decentralized_ris/`:
 
 ```bash
-python -m py_compile *.py
-bash -n run_exp-v2.sh excel_helper.sh
-python test_discrete_mapping.py
+python -m compileall -q .
+python -m tests.test_phase_quantization
+python -m tests.test_forward_equivalence
+python -m tests.test_rate_equivalence
+bash -n scripts/*.sh
 ```
